@@ -19,5 +19,5 @@
 # under the License.
 ##############################################################################
 
-source "$(dirname "$0")/impala-python-common.sh"
+source "$IMPALA_HOME/bin/impala-python-common.sh"
 exec "$PY_ENV_DIR/bin/python" "$@"
