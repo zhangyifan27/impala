@@ -1220,6 +1220,10 @@ Status impala::SetQueryOption(const string& key, const string& value,
         query_options->__set_test_replan(IsTrue(value));
         break;
       }
+      case TImpalaQueryOptions::DISABLE_SCAN_NODE_MT: {
+        query_options->__set_disable_scan_node_mt(IsTrue(value));
+        break;
+      }
       default:
         if (IsRemovedQueryOption(key)) {
           LOG(WARNING) << "Ignoring attempt to set removed query option '" << key << "'";

@@ -104,8 +104,11 @@ Status HdfsScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
 
     // Release the scanner threads
     discard_result(ranges_issued_barrier_.Notify());
+  }
 
-    if (shared_state_->progress().done()) SetDone();
+  // All ranges are finished or no range to read. Indicate we are done.
+  if (shared_state_->progress().done() || num_scan_ranges_.Load() == 0) {
+    SetDone();
   }
 
   Status status = GetNextInternal(state, row_batch, eos);
@@ -256,8 +259,8 @@ void HdfsScanNode::ThreadTokenAvailableCb(ThreadResourcePool* pool) {
   // promptly. However, we want to minimize that by checking a conditions.
   //  1. Don't start up if the ScanNode is done
   //  2. Don't start up if all the ranges have been taken by another thread.
-  //  3. Don't start up if the number of ranges left is less than the number of
-  //     active scanner threads.
+  //  3. Don't start up if the number of ranges is less than the number of
+  //     started scanner threads.
   //  4. Don't start up if no initial ranges have been issued (see IMPALA-1722).
   //  5. Don't start up a ScannerThread if the row batch queue is not full since
   //     we are not scanner bound.
@@ -296,12 +299,13 @@ void HdfsScanNode::ThreadTokenAvailableCb(ThreadResourcePool* pool) {
     }
 
     const int64_t num_active_scanner_threads = thread_state_.GetNumActive();
+    const int64_t num_scanner_threads_started = thread_state_.GetNumStarted();
     const bool first_thread = num_active_scanner_threads == 0;
     const int64_t est_mem = thread_state_.estimated_per_thread_mem();
     const int64_t scanner_thread_reservation = resource_profile_.min_reservation;
     // Cases 1, 2, 3.
-    if (done() || all_ranges_started_ ||
-        num_active_scanner_threads >= shared_state_->progress().remaining()) {
+    if (done() || all_ranges_started_
+        || num_scanner_threads_started >= num_scan_ranges_.Load()) {
       break;
     }
 
@@ -460,7 +464,7 @@ void HdfsScanNode::ScannerThread(bool first_thread, int64_t scanner_thread_reser
     runtime_state_->query_state()->scanner_mem_limiter()->ReleaseMemoryForScannerThread(
         this, thread_state_.estimated_per_thread_mem());
   }
-  thread_state_.DecrementNumActive();
+  if (thread_state_.DecrementNumActive()) SetDone();
 }
 
 void HdfsScanNode::ProcessSplit(const vector<FilterContext>& filter_ctxs,

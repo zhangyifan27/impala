@@ -1911,6 +1911,16 @@ public class HdfsScanNode extends ScanNode {
             .append(" max-scan-range-rows=")
             .append(PrintUtils.printEstCardinality(maxScanRangeNumRows_))
             .append("\n");
+      String scanNodeType;
+      if (useMtScanNode_) {
+        scanNodeType = "single-threaded";
+      } else {
+        scanNodeType = "multiple-threaded";
+      }
+      output.append(detailPrefix)
+          .append("scan node type: ")
+          .append(scanNodeType)
+          .append("\n");
       if (numScanRangesNoDiskIds_ > 0) {
         output.append(detailPrefix)
           .append(String.format("missing disk ids: "
@@ -1923,7 +1933,6 @@ public class HdfsScanNode extends ScanNode {
       output.append(getMinMaxOriginalConjunctsExplainString(detailPrefix, detailLevel));
       // Groups the dictionary filterable conjuncts by tuple descriptor.
       output.append(getDictionaryConjunctsExplainString(detailPrefix, detailLevel));
-
     }
     if (detailLevel.ordinal() >= TExplainLevel.VERBOSE.ordinal()) {
       // Add file formats after sorting so their order is deterministic in the explain
@@ -2070,7 +2079,7 @@ public class HdfsScanNode extends ScanNode {
     }
 
     // The non-MT scan node requires at least one scanner thread.
-    useMtScanNode_ = queryOptions.mt_dop > 0;
+    useMtScanNode_ = queryOptions.mt_dop > 0 && !queryOptions.disable_scan_node_mt;
     int requiredThreads = useMtScanNode_ ? 0 : 1;
     int maxScannerThreads = computeMaxNumberOfScannerThreads(queryOptions,
         perHostScanRanges);
