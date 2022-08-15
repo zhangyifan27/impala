@@ -330,7 +330,8 @@ Status HdfsScanPlanNode::ProcessScanRangesAndInitSharedState(FragmentState* stat
   shared_state_.use_mt_scan_node_ = tnode_->hdfs_scan_node.use_mt_scan_node;
 
   // Distribute the work evenly for issuing initial scan ranges.
-  DCHECK(shared_state_.use_mt_scan_node_ || instance_ctx_pbs.size() == 1)
+  DCHECK(shared_state_.use_mt_scan_node_ || instance_ctx_pbs.size() == 1
+      || (instance_ctx_pbs.size() > 1 && state->query_options().disable_scan_node_mt))
       << "Non MT scan node should only have a single instance.";
   auto instance_ctxs = state->instance_ctxs();
   DCHECK_EQ(instance_ctxs.size(), instance_ctx_pbs.size());
@@ -664,6 +665,7 @@ Status HdfsScanNodeBase::IssueInitialScanRanges(RuntimeState* state) {
   for (HdfsFileDesc* file : *file_list) {
     if (FilePassesFilterPredicates(filter_ctxs_, file->file_format, file)) {
       matching_per_type_files[file->file_format].push_back(file);
+      num_scan_ranges_.Add(file->splits.size());
     } else {
       SkipFile(file->file_format, file);
     }

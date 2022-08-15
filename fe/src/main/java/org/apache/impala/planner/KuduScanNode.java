@@ -412,7 +412,7 @@ public class KuduScanNode extends ScanNode {
         kudu_scanner_thread_max_estimated_bytes;
     long mem_estimate_per_thread = Math.min(getNumMaterializedSlots(desc_) *
         estimated_bytes_per_column_per_thread, max_estimated_bytes_per_thread);
-    useMtScanNode_ = queryOptions.mt_dop > 0;
+    useMtScanNode_ = queryOptions.mt_dop > 0 && !queryOptions.disable_scan_node_mt;
     nodeResourceProfile_ = new ResourceProfileBuilder()
         .setMemEstimateBytes(mem_estimate_per_thread * maxScannerThreads)
         .setThreadReservation(useMtScanNode_ ? 0 : 1).build();
@@ -446,6 +446,16 @@ public class KuduScanNode extends ScanNode {
           result.append(detailPrefix + "runtime filters: ");
           result.append(getRuntimeFilterExplainString(false, detailLevel));
         }
+        String scanNodeType;
+        if (useMtScanNode_) {
+          scanNodeType = "single-threaded";
+        } else {
+          scanNodeType = "multiple-threaded";
+        }
+        result.append(detailPrefix)
+            .append("scan node type: ")
+            .append(scanNodeType)
+            .append("\n");
       }
     }
     return result.toString();

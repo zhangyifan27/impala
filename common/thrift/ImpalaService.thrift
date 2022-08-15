@@ -733,6 +733,10 @@ enum TImpalaQueryOptions {
 
   // Maximum wait time on HMS ACID lock in seconds.
   LOCK_MAX_WAIT_TIME_S = 145
+
+  // If true, use HdfsScanNode/KuduScanNode instead of HdfsScanNodeMt/KuduScanNodeMt
+  // in any cases even if mt_dop > 0.
+  DISABLE_SCAN_NODE_MT = 146;
 }
 
 // The summary of a DML statement.

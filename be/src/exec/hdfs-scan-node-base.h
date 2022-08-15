@@ -740,6 +740,9 @@ class HdfsScanNodeBase : public ScanNode {
   AtomicInt32 num_scanners_codegen_enabled_;
   AtomicInt32 num_scanners_codegen_disabled_;
 
+  /// The number of scan ranges that need to be scanned by a non-MT scan node.
+  AtomicInt32 num_scan_ranges_;
+
   /// If true, counters are actively running and need to be reported in the runtime
   /// profile.
   bool counters_running_ = false;
