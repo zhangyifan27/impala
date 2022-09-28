@@ -132,7 +132,8 @@ Status ScanPlanNode::CreateExecNode(RuntimeState* state, ExecNode** node) const 
         *node = pool->Add(new KuduScanNodeMt(pool, *this, state->desc_tbl()));
       } else {
         DCHECK(state->query_options().mt_dop == 0
-            || state->query_options().num_scanner_threads == 1);
+            || state->query_options().num_scanner_threads == 1
+            || state->query_options().disable_scan_node_mt);
         *node = pool->Add(new KuduScanNode(pool, *this, state->desc_tbl()));
       }
       break;

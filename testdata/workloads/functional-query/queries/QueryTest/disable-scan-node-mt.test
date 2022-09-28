@@ -1,0 +1,36 @@
+====
+---- QUERY
+# DISABLE_SCAN_NODE_MT=false
+set mt_dop=3;
+set explain_level=3;
+explain select count(*) from alltypes;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex: .*scan node type: single-threaded
+---- TYPES
+STRING
+====
+---- QUERY
+# DISABLE_SCAN_NODE_MT=true
+set mt_dop=3;
+set disable_scan_node_mt=1;
+set explain_level=3;
+explain select count(*) from alltypes;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex: .*scan node type: multiple-threaded
+---- TYPES
+STRING
+====
+---- QUERY
+# DISABLE_SCAN_NODE_MT=true, so we can get scanner thread related counters in profile.
+set mt_dop=3;
+set disable_scan_node_mt=1;
+select count(*) from alltypes;
+---- TYPES
+BIGINT
+---- RESULTS
+7300
+---- RUNTIME_PROFILE
+row_regex: .*scan node type: multiple-threaded
+row_regex: .*Query Options \(set by configuration\): .*MT_DOP=3.*DISABLE_SCAN_NODE_MT=1.*
+row_regex: .*AverageScannerThreadConcurrency: .*
+====
