@@ -43,10 +43,10 @@
 #include <gutil/walltime.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <rapidjson/error/en.h>
 #include <rapidjson/rapidjson.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
-#include <rapidjson/error/en.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -54,12 +54,19 @@
 #include "catalog/catalog-util.h"
 #include "common/compiler-util.h"
 #include "common/logging.h"
+#include "common/names.h"
 #include "common/object-pool.h"
 #include "common/thread-debug-info.h"
 #include "common/version.h"
 #include "exec/external-data-source-executor.h"
 #include "exprs/timezone_db.h"
 #include "gen-cpp/CatalogService_constants.h"
+#include "gen-cpp/DataSinks_types.h"
+#include "gen-cpp/Frontend_types.h"
+#include "gen-cpp/ImpalaService.h"
+#include "gen-cpp/ImpalaService_types.h"
+#include "gen-cpp/LineageGraph_types.h"
+#include "gen-cpp/Types_types.h"
 #include "gen-cpp/admission_control_service.proxy.h"
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/rpc/rpc_controller.h"
@@ -87,6 +94,7 @@
 #include "util/auth-util.h"
 #include "util/bit-util.h"
 #include "util/coding-util.h"
+#include "util/common-metrics.h"
 #include "util/debug-util.h"
 #include "util/error-util.h"
 #include "util/histogram-metric.h"
@@ -106,15 +114,6 @@
 #include "util/test-info.h"
 #include "util/time.h"
 #include "util/uid-util.h"
-
-#include "gen-cpp/Types_types.h"
-#include "gen-cpp/ImpalaService.h"
-#include "gen-cpp/DataSinks_types.h"
-#include "gen-cpp/ImpalaService_types.h"
-#include "gen-cpp/LineageGraph_types.h"
-#include "gen-cpp/Frontend_types.h"
-
-#include "common/names.h"
 
 using boost::adopt_lock_t;
 using boost::algorithm::is_any_of;
@@ -2339,6 +2338,7 @@ void ImpalaServer::BuildLocalBackendDescriptorInternal(BackendDescriptorPB* be_d
   be_desc->set_admission_slots(exec_env_->admission_slots());
   be_desc->set_is_quiescing(is_quiescing);
   SetExecutorGroups(FLAGS_executor_groups, be_desc);
+  be_desc->set_process_start_time(CommonMetrics::PROCESS_START_TIME->GetValue());
 }
 
 ImpalaServer::QueryStateRecord::QueryStateRecord(
