@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gutil/strings/substitute.h>
+#include "service/impala-server.h"
+
 #include <sstream>
 #include <vector>
 
-#include "service/impala-server.h"
+#include <gutil/strings/substitute.h>
+
+#include "gen-cpp/statestore_service.pb.h"
 #include "testutil/gtest-util.h"
 
 using namespace impala;
@@ -69,4 +72,19 @@ TEST(ImpalaServerTest, PopulateAuthorizedProxyConfig) {
 
     EXPECT_EQ(proxy_map.end(), proxy_map.find("doesnotexist"));
   }
+}
+
+TEST(ImpalaServerTest, TestSetExecutorGroups) {
+  string executor_groups_flag = "default-pool-1:3";
+  BackendDescriptorPB be_desc;
+  ImpalaServer::SetExecutorGroups(executor_groups_flag, &be_desc);
+  EXPECT_EQ(1, be_desc.executor_groups_size());
+  EXPECT_EQ(3, be_desc.executor_groups(0).min_size());
+
+  string executor_groups_flag_no_min_size = "default_pool";
+  be_desc.clear_executor_groups();
+  EXPECT_EQ(0, be_desc.executor_groups_size());
+  ImpalaServer::SetExecutorGroups(executor_groups_flag_no_min_size, &be_desc);
+  EXPECT_EQ(1, be_desc.executor_groups_size());
+  EXPECT_EQ(1, be_desc.executor_groups(0).min_size());
 }

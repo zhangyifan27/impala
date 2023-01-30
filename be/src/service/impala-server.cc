@@ -380,34 +380,6 @@ DECLARE_bool(jwt_validate_signature);
 DECLARE_string(jwks_file_path);
 DECLARE_string(jwks_url);
 
-namespace {
-using namespace impala;
-
-void SetExecutorGroups(const string& flag, BackendDescriptorPB* be_desc) {
-  vector<StringPiece> groups;
-  groups = Split(flag, ",", SkipEmpty());
-  if (groups.empty()) groups.push_back(ImpalaServer::DEFAULT_EXECUTOR_GROUP_NAME);
-  DCHECK_EQ(1, groups.size());
-  // Name and optional minimum group size are separated by ':'.
-  for (const StringPiece& group : groups) {
-    int colon_idx = group.find_first_of(':');
-    ExecutorGroupDescPB* group_desc = be_desc->add_executor_groups();
-    group_desc->set_name(group.substr(0, colon_idx).as_string());
-    if (colon_idx != StringPiece::npos) {
-      StringParser::ParseResult result;
-      group_desc->set_min_size(StringParser::StringToInt<int64_t>(
-          group.data() + colon_idx + 1, group.length() - colon_idx - 1, &result));
-      if (result != StringParser::PARSE_SUCCESS) {
-        LOG(FATAL) << "Failed to parse minimum executor group size from group: "
-                     << group.ToString();
-      }
-    } else {
-      group_desc->set_min_size(1);
-    }
-  }
-}
-} // end anonymous namespace
-
 namespace impala {
 
 // Prefix of profile, event and lineage log filenames. The version number is
@@ -621,6 +593,30 @@ Status ImpalaServer::PopulateAuthorizedProxyConfig(
     }
   }
   return Status::OK();
+}
+
+void ImpalaServer::SetExecutorGroups(const string& flag, BackendDescriptorPB* be_desc) {
+  vector<StringPiece> groups;
+  groups = Split(flag, ",", SkipEmpty());
+  if (groups.empty()) groups.push_back(ImpalaServer::DEFAULT_EXECUTOR_GROUP_NAME);
+  DCHECK_EQ(1, groups.size());
+  // Name and optional minimum group size are separated by ':'.
+  for (const StringPiece& group : groups) {
+    int colon_idx = group.find_first_of(':');
+    ExecutorGroupDescPB* group_desc = be_desc->add_executor_groups();
+    group_desc->set_name(group.substr(0, colon_idx).as_string());
+    if (colon_idx != StringPiece::npos) {
+      StringParser::ParseResult result;
+      group_desc->set_min_size(StringParser::StringToInt<int64_t>(
+          group.data() + colon_idx + 1, group.length() - colon_idx - 1, &result));
+      if (result != StringParser::PARSE_SUCCESS) {
+        LOG(FATAL) << "Failed to parse minimum executor group size from group: "
+                   << group.ToString();
+      }
+    } else {
+      group_desc->set_min_size(1);
+    }
+  }
 }
 
 bool ImpalaServer::IsCoordinator() { return is_coordinator_; }

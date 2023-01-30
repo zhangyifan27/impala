@@ -20,6 +20,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+
 #include <boost/random/random_device.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
@@ -467,6 +468,8 @@ class ImpalaServer : public ImpalaServiceIf,
   /// Returns the port that the Beeswax server is listening on. Valid to call after
   /// the server has started successfully.
   int GetHS2Port();
+
+  static void SetExecutorGroups(const string& flag, BackendDescriptorPB* be_desc);
 
   /// Returns a current snapshot of the local backend descriptor.
   std::shared_ptr<const BackendDescriptorPB> GetLocalBackendDescriptor();
