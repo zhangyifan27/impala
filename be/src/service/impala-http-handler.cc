@@ -453,6 +453,22 @@ void ImpalaHttpHandler::QueryStateToJson(const ImpalaServer::QueryStateRecord& r
   Value progress_json(progress.c_str(), document->GetAllocator());
   value->AddMember("progress", progress_json, document->GetAllocator());
 
+  const string& printed_bytes_read = PrettyPrinter::PrintBytes(record.bytes_read);
+  Value val_bytes_read(printed_bytes_read.c_str(), document->GetAllocator());
+  value->AddMember("bytes_read", val_bytes_read, document->GetAllocator());
+
+  const string& printed_total_bytes_sent =
+      PrettyPrinter::PrintBytes(record.total_bytes_sent);
+  Value val_total_bytes_sent(printed_total_bytes_sent.c_str(), document->GetAllocator());
+  value->AddMember("total_bytes_sent", val_total_bytes_sent, document->GetAllocator());
+
+  const string& printed_peak_per_host_mem_consumption =
+      PrettyPrinter::PrintBytes(record.peak_per_host_mem_consumption);
+  Value val_peak_per_host_mem_consumption(
+      printed_peak_per_host_mem_consumption.c_str(), document->GetAllocator());
+  value->AddMember("peak_per_host_mem_consumption", val_peak_per_host_mem_consumption,
+      document->GetAllocator());
+
   Value state(record.query_state.c_str(), document->GetAllocator());
   value->AddMember("state", state, document->GetAllocator());
 

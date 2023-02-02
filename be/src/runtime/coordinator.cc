@@ -1418,10 +1418,11 @@ void Coordinator::ReleaseBackendAdmissionControlResources(
 }
 
 Coordinator::ResourceUtilization Coordinator::ComputeQueryResourceUtilization() {
-  DCHECK(exec_rpcs_complete_.Load()) << "Exec() must be called first";
   ResourceUtilization query_resource_utilization;
-  for (BackendState* backend_state: backend_states_) {
-    query_resource_utilization.Merge(backend_state->GetResourceUtilization());
+  if (exec_rpcs_complete_.Load()) {
+    for (BackendState* backend_state : backend_states_) {
+      query_resource_utilization.Merge(backend_state->GetResourceUtilization());
+    }
   }
   return query_resource_utilization;
 }

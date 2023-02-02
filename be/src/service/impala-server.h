@@ -934,6 +934,16 @@ class ImpalaServer : public ImpalaServiceIf,
     /// The number of rows fetched by the client
     int64_t num_rows_fetched;
 
+    /// Total bytes read by this query
+    int64_t bytes_read = 0;
+
+    /// Total bytes sent by this query
+    int64_t total_bytes_sent = 0;
+
+    /// Peak memory used for this query (value of the query memtracker's
+    /// peak_consumption()). This is the max peak value from any backend.
+    int64_t peak_per_host_mem_consumption = 0;
+
     /// The state of the query as of this snapshot. The possible values for the
     /// query_state = union(beeswax::QueryState, ClientRequestState::RetryState). This is
     /// necessary so that the query_state can accurately reflect if a query has been

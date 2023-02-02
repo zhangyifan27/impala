@@ -2370,6 +2370,11 @@ void ImpalaServer::QueryStateRecord::Init(const ClientRequestState& query_handle
   if (coord != nullptr) {
     num_complete_fragments = coord->progress().num_complete();
     total_fragments = coord->progress().total();
+    Coordinator::ResourceUtilization utilization =
+        coord->ComputeQueryResourceUtilization();
+    bytes_read = utilization.bytes_read;
+    total_bytes_sent = utilization.scan_bytes_sent + utilization.exchange_bytes_sent;
+    peak_per_host_mem_consumption = utilization.peak_per_host_mem_consumption;
     has_coord = true;
   }
   beeswax_query_state = query_handle.BeeswaxQueryState();
