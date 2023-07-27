@@ -779,15 +779,58 @@ TEST(ClusterMembershipMgrUnitTest, PopulateExecutorMembershipRequest) {
     exec_group2.AddExecutor(MakeBackendDescriptor(1, exec_group2, 1));
     exec_group2.AddExecutor(MakeBackendDescriptor(2, exec_group2, 2));
     snapshot_ptr->executor_groups.insert({exec_group2.name(), exec_group2});
+    EXPECT_EQ(snapshot_ptr->executor_groups.size(), 2);
     ClusterMembershipMgr::SnapshotPtr ptr = snapshot_ptr;
     PopulateExecutorMembershipRequest(ptr, populated_exec_group_sets, update_req);
-    EXPECT_EQ(update_req.exec_group_sets.size(), 2);
+    // The executor group that does not match to any executor group sets is not included
+    // in the update request.
+    EXPECT_EQ(update_req.exec_group_sets.size(), 1);
     EXPECT_EQ(update_req.exec_group_sets[0].curr_num_executors, 1);
     EXPECT_EQ(update_req.exec_group_sets[0].expected_num_executors, 2);
     EXPECT_EQ(update_req.exec_group_sets[0].exec_group_name_prefix, "foo");
-    EXPECT_EQ(update_req.exec_group_sets[1].curr_num_executors, 0);
-    EXPECT_EQ(update_req.exec_group_sets[1].expected_num_executors, 10);
-    EXPECT_EQ(update_req.exec_group_sets[1].exec_group_name_prefix, "bar");
+    snapshot_ptr->executor_groups.clear();
+  }
+
+  // Case 2e: Using executor groups, expected_exec_group_sets is non-empty
+  // and one default executor group has more number of executors.
+  {
+    ExecutorGroup exec_group("foo-group1", 1);
+    exec_group.AddExecutor(MakeBackendDescriptor(1, exec_group, 0));
+    snapshot_ptr->executor_groups.insert({exec_group.name(), exec_group});
+    // Adding a default exec group.
+    ExecutorGroup exec_group2(ImpalaServer::DEFAULT_EXECUTOR_GROUP_NAME, 1);
+    exec_group2.AddExecutor(MakeBackendDescriptor(1, exec_group2, 1));
+    exec_group2.AddExecutor(MakeBackendDescriptor(2, exec_group2, 2));
+    snapshot_ptr->executor_groups.insert({exec_group2.name(), exec_group2});
+    ClusterMembershipMgr::SnapshotPtr ptr = snapshot_ptr;
+    PopulateExecutorMembershipRequest(ptr, populated_exec_group_sets, update_req);
+    EXPECT_EQ(update_req.exec_group_sets.size(), 2);
+    EXPECT_EQ(update_req.exec_group_sets[0].curr_num_executors, 2);
+    EXPECT_EQ(update_req.exec_group_sets[0].expected_num_executors, 20);
+    EXPECT_EQ(update_req.exec_group_sets[0].exec_group_name_prefix, "");
+    EXPECT_EQ(update_req.exec_group_sets[1].curr_num_executors, 1);
+    EXPECT_EQ(update_req.exec_group_sets[1].expected_num_executors, 2);
+    EXPECT_EQ(update_req.exec_group_sets[1].exec_group_name_prefix, "foo");
+    snapshot_ptr->executor_groups.clear();
+  }
+
+  // Case 2f: Using executor groups, expected_exec_group_sets is non-empty
+  // and no executor group match to the configured executor group sets.
+  {
+    ExecutorGroup exec_group("unmatch-group1", 1);
+    exec_group.AddExecutor(MakeBackendDescriptor(1, exec_group, 0));
+    snapshot_ptr->executor_groups.insert({exec_group.name(), exec_group});
+    // Adding a default exec group.
+    ExecutorGroup exec_group2(ImpalaServer::DEFAULT_EXECUTOR_GROUP_NAME, 1);
+    exec_group2.AddExecutor(MakeBackendDescriptor(1, exec_group2, 1));
+    exec_group2.AddExecutor(MakeBackendDescriptor(2, exec_group2, 2));
+    snapshot_ptr->executor_groups.insert({exec_group2.name(), exec_group2});
+    ClusterMembershipMgr::SnapshotPtr ptr = snapshot_ptr;
+    PopulateExecutorMembershipRequest(ptr, populated_exec_group_sets, update_req);
+    EXPECT_EQ(update_req.exec_group_sets.size(), 1);
+    EXPECT_EQ(update_req.exec_group_sets[0].curr_num_executors, 2);
+    EXPECT_EQ(update_req.exec_group_sets[0].expected_num_executors, 20);
+    EXPECT_EQ(update_req.exec_group_sets[0].exec_group_name_prefix, "");
     snapshot_ptr->executor_groups.clear();
   }
 }

@@ -1969,8 +1969,18 @@ public class Frontend {
     }
     if (executorGroupSets.size() > 0 && result.size() == 0
         && StringUtils.isNotEmpty(request_pool)) {
-      throw new AnalysisException("Request pool: " + request_pool
-          + " does not map to any known executor group set.");
+      // If the default group exists, fall back to the default group.
+      TExecutorGroupSet e = executorGroupSets.get(0);
+      if (e.getExec_group_name_prefix() == null
+          || e.getExec_group_name_prefix().isEmpty()) {
+        result.add(new TExecutorGroupSet(e));
+        result.get(0).setMax_mem_limit(Long.MAX_VALUE);
+        result.get(0).setNum_cores_per_executor(Integer.MAX_VALUE);
+      }
+      else {
+        throw new AnalysisException("Request pool: " + request_pool
+            + " does not map to any known executor group set.");
+      }
     }
 
     // Sort 'executorGroupSets' by
@@ -2194,7 +2204,7 @@ public class Frontend {
 
       boolean matchFound = false;
       if (clientSetRequestPool) {
-        if (!default_executor_group) {
+        if (!default_executor_group && !group_set.getExec_group_name_prefix().isEmpty()) {
           Preconditions.checkState(group_set.getExec_group_name_prefix().endsWith(
               queryOptions.getRequest_pool()));
         }
@@ -2277,7 +2287,7 @@ public class Frontend {
       boolean clientSetRequestPool, TExecRequest req, TExecutorGroupSet group_set) {
     // Set the group name prefix in both the returned query options and
     // the query context for non default group setup.
-    if (!default_executor_group) {
+    if (!default_executor_group && !group_set.getExec_group_name_prefix().isEmpty()) {
       String namePrefix = group_set.getExec_group_name_prefix();
       req.query_options.setRequest_pool(namePrefix);
       req.setRequest_pool_set_by_frontend(!clientSetRequestPool);
