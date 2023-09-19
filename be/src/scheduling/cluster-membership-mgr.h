@@ -289,6 +289,7 @@ class ClusterMembershipMgr {
 /// The frontend uses cluster membership information to determine whether it expects the
 /// scheduler to assign local or remote reads. It also uses the number of executors to
 /// determine the join type (partitioned vs broadcast).
+/// Only non-empty executor group sets will be included in the 'update_req'.
 void PopulateExecutorMembershipRequest(ClusterMembershipMgr::SnapshotPtr& snapshot,
     const std::vector<TExecutorGroupSet>& expected_exec_group_sets,
     TUpdateExecutorMembershipRequest& update_req);
