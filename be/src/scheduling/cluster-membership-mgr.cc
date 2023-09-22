@@ -665,48 +665,55 @@ void PopulateExecutorMembershipRequest(ClusterMembershipMgr::SnapshotPtr& snapsh
         exec_group_sets.back().curr_num_executors++;
       }
     }
+  }
+
+  if (exec_group_sets.empty() && expected_exec_group_sets.empty()) {
+    // Add a default exec group set if no expected group sets were specified.
+    exec_group_sets.emplace_back();
+    exec_group_sets.back().__set_expected_num_executors(FLAGS_num_expected_executors);
   } else {
-    if (expected_exec_group_sets.empty()) {
-      // Add a default exec group set if no expected group sets were specified.
-      exec_group_sets.emplace_back();
-      exec_group_sets.back().__set_expected_num_executors(FLAGS_num_expected_executors);
-    } else {
-      exec_group_sets.insert(exec_group_sets.begin(), expected_exec_group_sets.begin(),
-          expected_exec_group_sets.end());
-    }
-    int matching_exec_groups_found = 0;
-    for (auto& set : exec_group_sets) {
-      int max_num_executors = -1;
-      StringPiece prefix(set.exec_group_name_prefix);
-      DCHECK(!prefix.empty() || exec_group_sets.size() == 1)
-          << "An empty group set prefix can only exist if no executor group sets are "
-             "specified";
-      for (const auto& it : snapshot->executor_groups) {
-        StringPiece name(it.first);
-        if (!prefix.empty() && !name.starts_with(prefix)) continue;
-        matching_exec_groups_found++;
-        if (!it.second.IsHealthy()) continue;
-        int num_executors = it.second.NumExecutors();
-        if (num_executors > max_num_executors) {
-          max_num_executors = num_executors;
-          set.curr_num_executors = num_executors;
-        }
+    exec_group_sets.insert(exec_group_sets.end(), expected_exec_group_sets.begin(),
+                           expected_exec_group_sets.end());
+  }
+  int matching_exec_groups_found = 0;
+  for (auto& set : exec_group_sets) {
+    // Ignore the processed default executor group.
+    if (set.exec_group_name_prefix.empty() && set.curr_num_executors > 0) continue;
+    int max_num_executors = -1;
+    StringPiece prefix(set.exec_group_name_prefix);
+    for (const auto& it : snapshot->executor_groups) {
+      if (it.first == ImpalaServer::DEFAULT_EXECUTOR_GROUP_NAME) continue;
+      StringPiece name(it.first);
+      if (!prefix.empty() && !name.starts_with(prefix)) continue;
+      matching_exec_groups_found++;
+      if (!it.second.IsHealthy()) continue;
+      int num_executors = it.second.NumExecutors();
+      if (num_executors > max_num_executors) {
+        max_num_executors = num_executors;
+        set.curr_num_executors = num_executors;
       }
     }
-    if (matching_exec_groups_found != snapshot->executor_groups.size()) {
-      vector<string> group_sets;
-      group_sets.reserve(exec_group_sets.size());
-      for (const auto& set : exec_group_sets) {
-        group_sets.push_back(set.exec_group_name_prefix);
+  }
+  if (matching_exec_groups_found != snapshot->executor_groups.size()) {
+    vector<string> group_sets(exec_group_sets.size());
+    for (const auto& set : exec_group_sets) {
+      group_sets.push_back(set.exec_group_name_prefix);
+    }
+    vector<string> group_names(snapshot->executor_groups.size());
+    for (const auto& it : snapshot->executor_groups) {
+      group_names.push_back(it.first);
+    }
+    LOG(WARNING) << "Some executor groups either do not match expected group sets or "
+        "match to more than one set. Expected group sets: " <<
+        boost::algorithm::join(group_sets, ",") << " Current executor groups: " <<
+        boost::algorithm::join(group_names, ",");
+    // Remove executor group sets that do not have any matched executors
+    for (auto it = exec_group_sets.begin(); it != exec_group_sets.end();) {
+      if (it->curr_num_executors == 0) {
+        exec_group_sets.erase(it);
+      } else {
+        it++;
       }
-      vector<string> group_names;
-      for (const auto& it : snapshot->executor_groups) {
-        group_names.push_back(it.first);
-      }
-      LOG(WARNING) << "Some executor groups either do not match expected group sets or "
-                   "match to more than one set. Expected group sets: "
-                << boost::algorithm::join(group_sets, ",") << " Current executor groups: "
-                << boost::algorithm::join(group_names, ",");
     }
   }
   update_req.__set_exec_group_sets(exec_group_sets);

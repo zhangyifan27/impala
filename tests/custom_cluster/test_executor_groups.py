@@ -1542,3 +1542,47 @@ class TestExecutorGroups(CustomClusterTestSuite):
     assert "Request Pool: root.large" in profile, profile
 
     self.client.close_query(handle)
+
+  @pytest.mark.execute_serially
+  def test_query_with_default_and_non_default_executor_groups(self):
+    """Test query planning and execution when there are default and non-default executor
+    groups in a cluster."""
+
+    # The path to resources directory which contains the admission control config files.
+    RESOURCES_DIR = os.path.join(os.environ['IMPALA_HOME'], "fe", "src", "test",
+                                 "resources")
+    fs_allocation_path = os.path.join(RESOURCES_DIR, "fair-scheduler-allocation.xml")
+    llama_site_path = os.path.join(RESOURCES_DIR, "llama-site-empty.xml")
+    # Start with a regular admission config with multiple pools and no resource limits.
+    self._restart_coordinators(num_coordinators=1,
+         extra_args="-expected_executor_group_sets=root.queue1:2,root.queue2:1 "
+                    "-fair_scheduler_allocation_path %s "
+                    "-llama_site_path %s" % (
+                      fs_allocation_path, llama_site_path))
+
+    # Set up a default group and a non-default group.
+    self._add_executor_group("", min_size=1, num_executors=1)
+    self._add_executor_group("group", min_size=2, num_executors=2,
+                             resource_pool="root.queue1")
+    self._wait_for_num_executor_groups(2, only_healthy=True)
+
+    # Create fresh client
+    self.create_impala_clients()
+    result = self.execute_query_expect_success(self.client, TEST_QUERY)
+    # Planner assumes that the query run on the default group.
+    assert "F00:PLAN FRAGMENT [RANDOM] hosts=1 instances=1" in str(result.runtime_profile)
+    # Expect to run the query on the default group.
+    assert "Executor Group: default" in str(result.runtime_profile)
+
+    result = self.execute_query_expect_success(self.client, TEST_QUERY,
+                                               query_options={'request_pool': 'queue1'})
+    # Planner assumes that the query run on root.queue1-group.
+    assert "F00:PLAN FRAGMENT [RANDOM] hosts=2 instances=2" in str(result.runtime_profile)
+    # Expect to run the query on root.queue1-group.
+    assert "Executor Group: root.queue1-group" in str(result.runtime_profile)
+
+    result = self.execute_query_expect_success(self.client, TEST_QUERY,
+                                               query_options={'request_pool': 'queue2'})
+    # The request pool does not exist, fall back to the default group.
+    assert "F00:PLAN FRAGMENT [RANDOM] hosts=1 instances=1" in str(result.runtime_profile)
+    assert "Executor Group: default" in str(result.runtime_profile)

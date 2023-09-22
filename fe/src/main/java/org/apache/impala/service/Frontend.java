@@ -1888,11 +1888,11 @@ public class Frontend {
    */
   public static List<TExecutorGroupSet> setupThresholdsForExecutorGroupSets(
       List<TExecutorGroupSet> executorGroupSets, String request_pool,
-      boolean default_executor_group, boolean test_replan) throws ImpalaException {
+      boolean default_executor_group_only, boolean test_replan) throws ImpalaException {
     RequestPoolService poolService = RequestPoolService.getInstance();
 
     List<TExecutorGroupSet> result = Lists.newArrayList();
-    if (default_executor_group) {
+    if (default_executor_group_only) {
       TExecutorGroupSet e = executorGroupSets.get(0);
       if (e.getCurr_num_executors() == 0) {
         // The default group has 0 executors. Return one with the number of default
@@ -1969,8 +1969,17 @@ public class Frontend {
     }
     if (executorGroupSets.size() > 0 && result.size() == 0
         && StringUtils.isNotEmpty(request_pool)) {
-      throw new AnalysisException("Request pool: " + request_pool
-          + " does not map to any known executor group set.");
+      // If the default group exists, fall back to the default group.
+      TExecutorGroupSet e = executorGroupSets.get(0);
+      if (isDefaultExecGroupSet(e)) {
+        result.add(new TExecutorGroupSet(e));
+        result.get(0).setMax_mem_limit(Long.MAX_VALUE);
+        result.get(0).setNum_cores_per_executor(Integer.MAX_VALUE);
+      }
+      else {
+        throw new AnalysisException("Request pool: " + request_pool
+            + " does not map to any known executor group set.");
+      }
     }
 
     // Sort 'executorGroupSets' by
@@ -2013,6 +2022,10 @@ public class Frontend {
         expectedNumExecutor(execGroupSet), execGroupSet.getNum_cores_per_executor());
   }
 
+  private static boolean isDefaultExecGroupSet(TExecutorGroupSet execGroupSet) {
+    return StringUtils.isEmpty(execGroupSet.getExec_group_name_prefix());
+  }
+
   private TExecRequest getTExecRequest(PlanCtx planCtx, EventSequence timeline)
       throws ImpalaException {
     TQueryCtx queryCtx = planCtx.getQueryContext();
@@ -2031,15 +2044,14 @@ public class Frontend {
     LOG.info("The original executor group sets from executor membership snapshot: "
         + originalExecutorGroupSets);
 
-    boolean default_executor_group = false;
+    boolean default_executor_group_only = false;
     if (originalExecutorGroupSets.size() == 1) {
       TExecutorGroupSet e = originalExecutorGroupSets.get(0);
-      default_executor_group = e.getExec_group_name_prefix() == null
-          || e.getExec_group_name_prefix().isEmpty();
+      default_executor_group_only = isDefaultExecGroupSet(e);
     }
     List<TExecutorGroupSet> executorGroupSetsToUse =
         Frontend.setupThresholdsForExecutorGroupSets(originalExecutorGroupSets,
-            queryOptions.getRequest_pool(), default_executor_group,
+            queryOptions.getRequest_pool(), default_executor_group_only,
             enable_replan
                 && (RuntimeEnv.INSTANCE.isTestEnv() || queryOptions.isTest_replan()));
 
@@ -2137,7 +2149,8 @@ public class Frontend {
       }
 
       if (notScalable) {
-        setGroupNamePrefix(default_executor_group, clientSetRequestPool, req, group_set);
+        setGroupNamePrefix(default_executor_group_only,
+            clientSetRequestPool, req, group_set);
         addInfoString(
             groupSetProfile, VERDICT, "Assign to first group because " + reason);
         FrontendProfile.getCurrent().addChildrenProfile(groupSetProfile);
@@ -2194,7 +2207,8 @@ public class Frontend {
 
       boolean matchFound = false;
       if (clientSetRequestPool) {
-        if (!default_executor_group) {
+        if (!default_executor_group_only &&
+            !group_set.getExec_group_name_prefix().isEmpty()) {
           Preconditions.checkState(group_set.getExec_group_name_prefix().endsWith(
               queryOptions.getRequest_pool()));
         }
@@ -2222,7 +2236,8 @@ public class Frontend {
       FrontendProfile.getCurrent().addChildrenProfile(groupSetProfile);
 
       if (matchFound) {
-        setGroupNamePrefix(default_executor_group, clientSetRequestPool, req, group_set);
+        setGroupNamePrefix(default_executor_group_only,
+            clientSetRequestPool, req, group_set);
         break;
       }
 
@@ -2273,11 +2288,12 @@ public class Frontend {
     return req;
   }
 
-  private static void setGroupNamePrefix(boolean default_executor_group,
+  private static void setGroupNamePrefix(boolean default_executor_group_only,
       boolean clientSetRequestPool, TExecRequest req, TExecutorGroupSet group_set) {
     // Set the group name prefix in both the returned query options and
     // the query context for non default group setup.
-    if (!default_executor_group) {
+    if (!default_executor_group_only &&
+        !group_set.getExec_group_name_prefix().isEmpty()) {
       String namePrefix = group_set.getExec_group_name_prefix();
       req.query_options.setRequest_pool(namePrefix);
       req.setRequest_pool_set_by_frontend(!clientSetRequestPool);
