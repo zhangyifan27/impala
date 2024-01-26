@@ -1008,6 +1008,7 @@ inline bool ScalarColumnReader<DateValue, parquet::Type::INT32, true>
 template <>
 bool ScalarColumnReader<DateValue, parquet::Type::INT32, true>::ValidateValue(
     DateValue* val) const {
+  *val = DateValue(val->Value());
   // The range was already checked during the int32_t->DateValue conversion, which
   // sets the date to invalid if it was out of range.
   if (UNLIKELY(!val->IsValid())) {
