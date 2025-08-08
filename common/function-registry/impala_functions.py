@@ -628,6 +628,10 @@ visible_functions = [
    [['prettyprint_bytes'], 'STRING', ['INT'], 'impala::StringFunctions::PrettyPrintMemory'],
    [['prettyprint_bytes'], 'STRING', ['SMALLINT'], 'impala::StringFunctions::PrettyPrintMemory'],
    [['prettyprint_bytes'], 'STRING', ['TINYINT'], 'impala::StringFunctions::PrettyPrintMemory'],
+   [['prettyprint_quantity'], 'STRING', ['BIGINT'], 'impala::StringFunctions::PrettyPrintQuantity'],
+   [['prettyprint_quantity'], 'STRING', ['INT'], 'impala::StringFunctions::PrettyPrintQuantity'],
+   [['prettyprint_quantity'], 'STRING', ['SMALLINT'], 'impala::StringFunctions::PrettyPrintQuantity'],
+   [['prettyprint_quantity'], 'STRING', ['TINYINT'], 'impala::StringFunctions::PrettyPrintQuantity'],
 # Netezza compatibility char functions
   [['chr'], 'STRING', ['INT'], 'impala::StringFunctions::Chr'],
   [['btrim'], 'STRING', ['STRING'], 'impala::StringFunctions::Trim',

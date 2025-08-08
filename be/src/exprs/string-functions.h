@@ -257,6 +257,13 @@ class StringFunctions {
   static StringVal PrettyPrintMemory(FunctionContext*, const SmallIntVal& bytes);
   static StringVal PrettyPrintMemory(FunctionContext*, const TinyIntVal& bytes);
 
+  // Converts a numeric value to a human readable format.
+  // For example, 123456789012 is converted to "123.46 B".
+  static StringVal PrettyPrintQuantity(FunctionContext*, const BigIntVal& value);
+  static StringVal PrettyPrintQuantity(FunctionContext*, const IntVal& value);
+  static StringVal PrettyPrintQuantity(FunctionContext*, const SmallIntVal& value);
+  static StringVal PrettyPrintQuantity(FunctionContext*, const TinyIntVal& value);
+
  private:
   static uint64_t re2_mem_limit_;
 

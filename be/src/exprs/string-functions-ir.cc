@@ -1934,6 +1934,26 @@ StringVal StringFunctions::PrettyPrintMemory(FunctionContext* context,
   return prettyPrint(context, bytes, TUnit::BYTES);
 }
 
+StringVal StringFunctions::PrettyPrintQuantity(FunctionContext* context,
+    const BigIntVal& value) {
+  return prettyPrint(context, value, TUnit::UNIT);
+}
+
+StringVal StringFunctions::PrettyPrintQuantity(FunctionContext* context,
+    const IntVal& value) {
+  return prettyPrint(context, value, TUnit::UNIT);
+}
+
+StringVal StringFunctions::PrettyPrintQuantity(FunctionContext* context,
+    const SmallIntVal& value) {
+  return prettyPrint(context, value, TUnit::UNIT);
+}
+
+StringVal StringFunctions::PrettyPrintQuantity(FunctionContext* context,
+    const TinyIntVal& value) {
+  return prettyPrint(context, value, TUnit::UNIT);
+}
+
 // The state is a bool used to reduce excessive logs.
 void StringFunctions::AesPrepare(FunctionContext* context,
     FunctionContext::FunctionStateScope scope) {

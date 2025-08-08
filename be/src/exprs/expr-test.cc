@@ -4447,6 +4447,38 @@ TEST_P(ExprTest, StringFunctions) {
   TestStringValue("prettyprint_bytes(9223372036854775807)", "8589934592.00 GB");
   TestStringValue("prettyprint_bytes(-9223372036854775808)", "-8589934592.00 GB");
 
+  // Test prettyprint_quantity
+  TestStringValue("prettyprint_quantity(0)", "0");
+  TestStringValue("prettyprint_quantity(1)", "1");
+  TestStringValue("prettyprint_quantity(100)", "100");
+  TestStringValue("prettyprint_quantity(1024)", "1.02K");
+  TestStringValue("prettyprint_quantity(-1234)", "-1.23K");
+  TestStringValue("prettyprint_quantity(1234567)", "1.23M");
+  TestStringValue("prettyprint_quantity(1234567901)", "1.23B");
+  TestIsNull("prettyprint_quantity(NULL)", TYPE_STRING);
+
+  // Test at the type boundaries for tinyint.
+  TestStringValue("prettyprint_quantity(127)", "127");
+  TestStringValue("prettyprint_quantity(128)", "128");
+  TestStringValue("prettyprint_quantity(-128)", "-128");
+  TestStringValue("prettyprint_quantity(-129)", "-129");
+
+  // Test at the type boundaries for smallint.
+  TestStringValue("prettyprint_quantity(32767)", "32.77K");
+  TestStringValue("prettyprint_quantity(32768)", "32.77K");
+  TestStringValue("prettyprint_quantity(-32768)", "-32.77K");
+  TestStringValue("prettyprint_quantity(-32769)", "-32.77K");
+
+  // Test at the type boundaries for int.
+  TestStringValue("prettyprint_quantity(2147483647)", "2.15B");
+  TestStringValue("prettyprint_quantity(2147483648)", "2.15B");
+  TestStringValue("prettyprint_quantity(-2147483648)", "-2.15B");
+  TestStringValue("prettyprint_quantity(-2147483649)", "-2.15B");
+
+  // Test at the type boundaries for bigint.
+  TestStringValue("prettyprint_quantity(9223372036854775807)", "9223372036.85B");
+  TestStringValue("prettyprint_quantity(-9223372036854775808)", "-9223372036.85B");
+
   TestStringValue("substring('Hello', 1)", "Hello");
   TestStringValue("substring('Hello', -2)", "lo");
   TestStringValue("substring('Hello', cast(0 as bigint))", "");
