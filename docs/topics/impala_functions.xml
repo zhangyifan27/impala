@@ -1049,6 +1049,13 @@ under the License.
           </row>
           <row>
             <entry>
+              <xref href=
+                "impala_string_functions.xml#string_functions/prettyprint_quantity">
+                PRETTYPRINT_QUANTITY</xref>
+            </entry>
+          </row>
+          <row>
+            <entry>
               <xref
                 href="impala_datetime_functions.xml#datetime_functions/quarter"
                 >QUARTER</xref>

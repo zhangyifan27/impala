@@ -187,6 +187,10 @@ under the License.
       </li>
 
       <li>
+        <xref href="#string_functions/prettyprint_quantity">PRETTYPRINT_QUANTITY</xref>
+      </li>
+
+      <li>
         <xref href="#string_functions/regexp_escape">REGEXP_ESCAPE</xref>
       </li>
 
@@ -1159,6 +1163,36 @@ select prettyprint_bytes(1), prettyprint_bytes(12345678), prettyprint_bytes(1234
 +----------------------+-----------------------------+-------------------------------+----------------------------------+
 | 1.00 B               | 11.77 MB                    | 1.15 GB                       | 1149.78 GB                       |
 +----------------------+-----------------------------+-------------------------------+----------------------------------+
+</codeblock>
+          </p>
+        </dd>
+      </dlentry>
+
+      <dlentry id="prettyprint_quantity">
+
+        <dt>
+          PRETTYPRINT_QUANTITY(TINYINT / SMALLINT / INT / BIGINT values)
+        </dt>
+
+        <dd>
+          <b>Purpose:</b> Formats numeric values in a human readable manner.
+          <p>
+            <b>Return type:</b> <codeph>STRING</codeph>
+          </p>
+
+          <p>
+            <b>Examples:</b>
+          </p>
+
+          <p>
+<codeblock>
+select prettyprint_quantity(1), prettyprint_quantity(12345678), prettyprint_quantity(1234567890), prettyprint_quantity(1234567890123);
+
++-------------------------+--------------------------------+----------------------------------+-------------------------------------+
+| prettyprint_quantity(1) | prettyprint_quantity(12345678) | prettyprint_quantity(1234567890) | prettyprint_quantity(1234567890123) |
++-------------------------+--------------------------------+----------------------------------+-------------------------------------+
+| 1                       | 12.35M                         | 1.23B                            | 1234.57B                            |
++-------------------------+--------------------------------+----------------------------------+-------------------------------------+
 </codeblock>
           </p>
         </dd>

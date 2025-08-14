@@ -63,7 +63,7 @@ class PrettyPrinter {
         std::string unit;
         double output = GetUnit(value, &unit);
         if (unit.empty()) {
-          ss << value;
+          ss << std::to_string(value);
         } else {
           ss << std::setprecision(PRECISION) << output << unit;
         }
@@ -219,13 +219,13 @@ class PrettyPrinter {
 
   template <typename T>
   static double GetUnit(T value, std::string* unit) {
-    if (value >= BILLION) {
+    if (value >= BILLION || (value < 0 && value <= -BILLION)) {
       *unit = "B";
       return value / (1. * BILLION);
-    } else if (value >= MILLION) {
+    } else if (value >= MILLION || (value < 0 && value <= -MILLION)) {
       *unit = "M";
       return value / (1. * MILLION);
-    } else if (value >= THOUSAND) {
+    } else if (value >= THOUSAND || (value < 0 && value <= -THOUSAND)) {
       *unit = "K";
       return value / (1. * THOUSAND);
     } else {
