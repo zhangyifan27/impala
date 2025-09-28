@@ -92,6 +92,39 @@ const uint8_t* FindEndOfIdentifier(const uint8_t* start, const uint8_t* end) {
   return end;
 }
 
+int ParseQuotedString(const char* start, const char* end, char quote_char,
+    std::string* result) {
+  result->clear();
+  if (start == nullptr || end == nullptr || result == nullptr || start >= end) {
+    return -1;
+  }
+
+  if (*start != quote_char) {
+    return -1;
+  }
+  ++start;
+
+  result->reserve(end - start);
+  const char* p = start;
+  while (p < end) {
+    if (*p == '\\' && p + 1 < end) {
+      ++p;
+      result->push_back(*p);
+      ++p;
+    } else if (*p == quote_char) {
+      // Found closing quote - parsing complete
+      ++p;
+      return p - start + 1;
+    } else {
+      result->push_back(*p);
+      ++p;
+    }
+  }
+
+  result->clear();
+  return -1;
+}
+
 int FindUtf8PosForward(const uint8_t* ptr, const int len, int index) {
   DCHECK_GE(index, 0);
   int pos = 0;

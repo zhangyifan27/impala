@@ -111,6 +111,44 @@ TEST(CommaSeparatedContainsTest, Basic) {
   EXPECT_FALSE(CommaSeparatedContains("foo , foo, foo,\nfoo,\tfoo", "foo"));
 }
 
+TEST(ParseQuotedStringTest, HandlesEmptyAndEscapedContent) {
+  string empty_result = "pre-set";
+  const string empty_input = "\"\"";
+  int consumed = ParseQuotedString(empty_input.data(),
+      empty_input.data() + empty_input.size(), '"', &empty_result);
+  EXPECT_EQ(2, consumed);
+  EXPECT_TRUE(empty_result.empty());
+
+  string escaped_result;
+  const string escaped_input = "\"foo\\\"bar\"";
+  consumed = ParseQuotedString(escaped_input.data(),
+      escaped_input.data() + escaped_input.size(), '"', &escaped_result);
+  EXPECT_EQ(static_cast<int>(escaped_input.size()), consumed);
+  EXPECT_EQ("foo\"bar", escaped_result);
+
+  string single_quote_result;
+  const string single_quote_input = "'it\\'s'";
+  consumed = ParseQuotedString(single_quote_input.data(),
+      single_quote_input.data() + single_quote_input.size(), '\'', &single_quote_result);
+  EXPECT_EQ(static_cast<int>(single_quote_input.size()), consumed);
+  EXPECT_EQ("it's", single_quote_result);
+}
+
+TEST(ParseQuotedStringTest, HandlesInvalidInput) {
+  string result = "unchanged";
+  const string no_quote_input = "not-quoted";
+  int consumed = ParseQuotedString(no_quote_input.data(),
+      no_quote_input.data() + no_quote_input.size(), '"', &result);
+  EXPECT_EQ(-1, consumed);
+  EXPECT_TRUE(result.empty());
+
+  const string unterminated_input = "\"unterminated";
+  consumed = ParseQuotedString(unterminated_input.data(),
+      unterminated_input.data() + unterminated_input.size(), '"', &result);
+  EXPECT_EQ(-1, consumed);
+  EXPECT_TRUE(result.empty());
+}
+
 TEST(FindUtf8PosForwardTest, Basic) {
   // Each Chinese character is encoded into 3 bytes in UTF-8.
   EXPECT_EQ(0, FindUtf8PosForward("李小龙", 9, 0));
