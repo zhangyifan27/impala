@@ -1,0 +1,225 @@
+====
+---- QUERY
+# Test array_contains with int array - element exists
+select id, array_contains(arr1, 10) from complextypes_arrays where id=5
+---- RESULTS
+5,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with int array - element does not exist
+select id, array_contains(arr1, 99) from complextypes_arrays where id=5
+---- RESULTS
+5,false
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with string array - element exists
+select id, array_contains(arr2, 'ten') from complextypes_arrays where id=5
+---- RESULTS
+5,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with string array - element does not exist
+select id, array_contains(arr2, 'notfound') from complextypes_arrays where id=5
+---- RESULTS
+5,false
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with int array - all rows
+select id, array_contains(arr1, 10) from complextypes_arrays order by id
+---- RESULTS
+1,false
+2,false
+3,true
+4,true
+5,true
+6,false
+7,false
+8,false
+9,NULL
+10,false
+11,NULL
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with string array - all rows
+select id, array_contains(arr2, 'ten') from complextypes_arrays order by id
+---- RESULTS
+1,false
+2,false
+3,true
+4,true
+5,true
+6,false
+7,false
+8,false
+9,false
+10,NULL
+11,NULL
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains searching for NULL in int array
+select id, array_contains(arr1, cast(NULL as int)) from complextypes_arrays where id=5
+---- RESULTS
+5,NULL
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains in WHERE clause with int array
+select id from complextypes_arrays where array_contains(arr1, 10) order by id
+---- RESULTS
+3
+4
+5
+---- TYPES
+int
+====
+---- QUERY
+# Test array_contains in WHERE clause with string array
+select id from complextypes_arrays where array_contains(arr2, 'ten') order by id
+---- RESULTS
+3
+4
+5
+---- TYPES
+int
+====
+---- QUERY
+# Test array_contains with multiple conditions - int and string arrays
+select id, array_contains(arr1, 10), array_contains(arr2, 'ten') 
+from complextypes_arrays where id <= 3 order by id
+---- RESULTS
+1,false,false
+2,false,false
+3,true,true
+---- TYPES
+int,boolean,boolean
+====
+---- QUERY
+# Test array_contains with JOIN
+select t1.id, array_contains(t1.arr1, 10), array_contains(t2.arr2, 'ten')
+from complextypes_arrays t1 join complextypes_arrays t2 on t1.id = t2.id
+where t1.id = 5
+---- RESULTS
+5,true,true
+---- TYPES
+int,boolean,boolean
+====
+---- QUERY
+# Test array_contains with UNION ALL
+select id, array_contains(arr1, 10) from complextypes_arrays where id=1
+union all
+select id, array_contains(arr2, 'ten') from complextypes_arrays where id=3
+---- RESULTS
+1,false
+3,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with aggregation
+select count(*) from complextypes_arrays where array_contains(arr1, 10)
+---- RESULTS
+3
+---- TYPES
+bigint
+====
+---- QUERY
+# Test array_contains with GROUP BY
+select array_contains(arr1, 10) as contains_ten, count(*) 
+from complextypes_arrays 
+group by array_contains(arr1, 10) order by contains_ten
+---- RESULTS
+false,6
+true,3
+NULL,2
+---- TYPES
+boolean,bigint
+====
+---- QUERY
+# Test array_contains with ORDER BY
+select id, array_contains(arr1, 10) as contains_ten
+from complextypes_arrays 
+where id <= 5
+order by contains_ten, id
+---- RESULTS
+1,false
+2,false
+3,true
+4,true
+5,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with subquery
+select id from complextypes_arrays t
+where array_contains(arr1, 10) = true order by id
+---- RESULTS
+3
+4
+5
+---- TYPES
+int
+====
+---- QUERY
+# Test array_contains with CASE expression - testing both int and string arrays
+select id, 
+  case when array_contains(arr1, 10) then 'contains 10 in arr1'
+       when array_contains(arr2, 'ten') then 'contains ten in arr2'
+       else 'neither'
+  end as result
+from complextypes_arrays where id <= 4 order by id
+---- RESULTS
+1,'neither'
+2,'neither'
+3,'contains 10 in arr1'
+4,'contains 10 in arr1'
+---- TYPES
+int,string
+====
+---- QUERY
+# Test array_contains with double array - element exists
+select i, array_contains(arr, cast(10.0 as double)) from functional_parquet.iceberg_metadata_alltypes where i=1
+---- RESULTS
+1,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with double array - element does not exist
+select i, array_contains(arr, cast(99.9 as double)) from functional_parquet.iceberg_metadata_alltypes where i=1
+---- RESULTS
+1,false
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with double array - all rows
+select i, array_contains(arr, -2e+100) from functional_parquet.iceberg_metadata_alltypes order by i
+---- RESULTS
+1,false
+5,true
+5,true
+---- TYPES
+int,boolean
+====
+---- QUERY
+# Test array_contains with double array - searching for NULL
+select i, array_contains(arr, cast(NULL as double)) from functional_parquet.iceberg_metadata_alltypes where i=1
+---- RESULTS
+1,NULL
+---- TYPES
+int,boolean
+====
