@@ -52,6 +52,11 @@ struct __attribute__((__packed__)) CollectionValue {
     return static_cast<int64_t>(num_tuples) * item_tuple_desc.byte_size();
   }
 
+  /// Returns a CollectionVal representation in the output variable.
+  impala_udf::CollectionVal ToCollectionVal() const {
+    return impala_udf::CollectionVal(ptr, num_tuples);
+  }
+
   /// For C++/IR interop, we need to be able to look up types by name.
   static const char* LLVM_CLASS_NAME;
 };

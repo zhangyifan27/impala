@@ -27,6 +27,7 @@
 #include "exprs/bit-byte-functions.h"
 #include "exprs/case-expr.h"
 #include "exprs/cast-functions.h"
+#include "exprs/collection-functions.h"
 #include "exprs/compound-predicates.h"
 #include "exprs/conditional-functions.h"
 #include "exprs/datasketches-functions.h"
@@ -454,6 +455,7 @@ void ScalarExprEvaluator::InitBuiltinsDummy() {
   AggregateFunctions::InitNull(nullptr, nullptr);
   BitByteFunctions::CountSet(nullptr, TinyIntVal::null());
   CastFunctions::CastToBooleanVal(nullptr, TinyIntVal::null());
+  CollectionFunctions::ArrayContainsTinyInt(nullptr, CollectionVal::null(), TinyIntVal::null());
   CompoundPredicate::Not(nullptr, BooleanVal::null());
   ConditionalFunctions::NullIfZero(nullptr, TinyIntVal::null());
   DataSketchesFunctions::DsHllEstimate(nullptr, StringVal::null());
