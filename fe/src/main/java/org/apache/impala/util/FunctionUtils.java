@@ -28,9 +28,11 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.apache.hadoop.fs.Path;
+import org.apache.impala.catalog.ArrayType;
 import org.apache.impala.catalog.Db;
 import org.apache.impala.catalog.Function;
 import org.apache.impala.catalog.Function.CompareMode;
+import org.apache.impala.catalog.MapType;
 import org.apache.impala.catalog.ScalarFunction;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.FileSystemUtil;
@@ -156,10 +158,18 @@ public abstract class FunctionUtils {
     }
 
     private int typeCompare(Type t1, Type t2) {
-      Preconditions.checkState(!t1.isComplexType());
-      Preconditions.checkState(!t2.isComplexType());
-      return Integer.compare(t1.getPrimitiveType().ordinal(),
-          t2.getPrimitiveType().ordinal());
+      if (t1.isComplexType() && t2.isComplexType()) {
+        // For complex types, compare their SQL representations
+        // (comparing individual fields would be more complex and is rarely needed)
+        return t1.toSql().compareTo(t2.toSql());
+      }
+      if (t1.isScalarType() && t2.isScalarType()) {
+        // For primitive types, use the original comparison
+        return Integer.compare(t1.getPrimitiveType().ordinal(),
+            t2.getPrimitiveType().ordinal());
+      }
+      // Complex types come after primitive types
+        return t1.isComplexType() ? 1 : -1;
     }
   }
 }

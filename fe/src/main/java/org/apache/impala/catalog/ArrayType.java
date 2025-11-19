@@ -56,6 +56,19 @@ public class ArrayType extends Type {
   }
 
   @Override
+  public String toString() {
+    return toSql();
+  }
+
+  @Override
+  public boolean matchesType(Type t) {
+    if (equals(t)) return true;
+    if (!t.isArrayType()) return false;
+    ArrayType otherArrayType = (ArrayType) t;
+    return itemType_.matchesType(otherArrayType.itemType_);
+  }
+
+  @Override
   public void toThrift(TColumnType container) {
     TTypeNode node = new TTypeNode();
     container.types.add(node);

@@ -25,6 +25,7 @@
 #include <assert.h>
 #include <boost/cstdint.hpp>
 #include <string.h>
+#include <vector>
 
 // Only use noexcept if the compiler supports C++11 (some system compilers may not
 // or may have it disabled by default).
@@ -109,6 +110,8 @@ class FunctionContext {
     TYPE_VARCHAR,
     // A fixed-size buffer, passed as a StringVal.
     TYPE_FIXED_UDA_INTERMEDIATE,
+    TYPE_ARRAY,
+    TYPE_MAP,
     TYPE_STRUCT
   };
 
@@ -122,6 +125,12 @@ class FunctionContext {
     /// Only valid if type is one of TYPE_FIXED_BUFFER, TYPE_FIXED_UDA_INTERMEDIATE or
     /// TYPE_VARCHAR.
     int len;
+
+    /// Only valid if type is one of TYPE_ARRAY, TYPE_MAP, or TYPE_STRUCT.
+    /// For TYPE_ARRAY: children[0] is the element type.
+    /// For TYPE_MAP: children[0] is the key type, children[1] is the value type.
+    /// For TYPE_STRUCT: children contains all field types.
+    std::vector<TypeDesc> children;
   };
 
   struct UniqueId {
