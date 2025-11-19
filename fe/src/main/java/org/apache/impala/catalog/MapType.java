@@ -57,6 +57,20 @@ public class MapType extends Type {
   }
 
   @Override
+  public String toString() {
+    return toSql();
+  }
+
+  @Override
+  public boolean matchesType(Type t) {
+    if (equals(t)) return true;
+    if (!t.isMapType()) return false;
+    MapType otherMapType = (MapType) t;
+    return keyType_.matchesType(otherMapType.keyType_) &&
+           valueType_.matchesType(otherMapType.valueType_);
+  }
+
+  @Override
   public String toSql(int depth) {
     if (depth >= MAX_NESTING_DEPTH) return "MAP<...>";
     return String.format("MAP<%s,%s>",

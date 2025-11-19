@@ -20,6 +20,7 @@
 
 #include <algorithm>
 
+#include "runtime/collection-value.h"
 #include "runtime/date-value.h"
 #include "runtime/runtime-state.h"
 #include "runtime/string-value.inline.h"
@@ -42,6 +43,7 @@ using impala_udf::TimestampVal;
 using impala_udf::StringVal;
 using impala_udf::DecimalVal;
 using impala_udf::DateVal;
+using impala_udf::CollectionVal;
 
 class ObjectPool;
 
@@ -203,6 +205,8 @@ class AnyValUtil {
       case TYPE_TIMESTAMP: return sizeof(TimestampVal);
       case TYPE_DECIMAL: return sizeof(DecimalVal);
       case TYPE_DATE: return sizeof(DateVal);
+      case TYPE_ARRAY:
+      case TYPE_MAP: return sizeof(CollectionVal);
       default:
         DCHECK(false) << t;
         return 0;
@@ -227,6 +231,8 @@ class AnyValUtil {
       case TYPE_TIMESTAMP: return alignof(TimestampVal);
       case TYPE_DECIMAL: return alignof(DecimalVal);
       case TYPE_DATE: return alignof(DateVal);
+      case TYPE_ARRAY:
+      case TYPE_MAP: return alignof(CollectionVal);
       default:
         DCHECK(false) << t;
         return 0;
@@ -337,6 +343,12 @@ class AnyValUtil {
         *reinterpret_cast<DateVal*>(dst) =
             reinterpret_cast<const DateValue*>(slot)->ToDateVal();
         return;
+      case TYPE_ARRAY:
+      case TYPE_MAP: {
+        *reinterpret_cast<CollectionVal*>(dst) =
+            reinterpret_cast<const CollectionValue*>(slot)->ToCollectionVal();
+        return;
+      }
       default:
         DCHECK(false) << "NYI: " << type;
     }
