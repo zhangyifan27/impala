@@ -20,6 +20,9 @@
 #include "runtime/collection-value.h"
 #include "runtime/descriptors.h"
 #include "runtime/string-value.h"
+#include "runtime/timestamp-value.h"
+#include "runtime/date-value.h"
+#include "runtime/types.h"
 #include "runtime/tuple.h"
 #include "udf/udf-internal.h"
 
@@ -188,6 +191,73 @@ BooleanVal CollectionFunctions::ArrayContainsString(
     }
   }
   return BooleanVal(false);
+}
+
+BooleanVal CollectionFunctions::ArrayContainsTimestamp(
+    FunctionContext* ctx, const CollectionVal& arr, const TimestampVal& item) {
+  if (arr.is_null || item.is_null) return BooleanVal::null();
+  ArrayContainsState* state = GetOrCreateArrayState(ctx);
+  if (state == nullptr) return BooleanVal::null();
+  DCHECK_GT(state->tuple_byte_size, 0);
+  
+  uint8_t* tuple_ptr = arr.ptr;
+  for (int i = 0; i < arr.num_tuples; ++i, tuple_ptr += state->tuple_byte_size) {
+    Tuple* tuple = reinterpret_cast<Tuple*>(tuple_ptr);
+    if (IsElementNull(state, tuple)) continue;
+    
+    TimestampValue* current_value =
+        reinterpret_cast<TimestampValue*>(tuple->GetSlot(state->slot_offset));
+    TimestampVal current_val = current_value->ToTimestampVal();
+
+    // Compare both date and time_of_day fields
+    if (current_val.date == item.date && 
+        current_val.time_of_day == item.time_of_day) {
+      return BooleanVal(true);
+    }
+  }
+  return BooleanVal(false);
+}
+
+BooleanVal CollectionFunctions::ArrayContainsDecimal(
+    FunctionContext* ctx, const CollectionVal& arr, const DecimalVal& item) {
+  if (arr.is_null || item.is_null) return BooleanVal::null();
+  ArrayContainsState* state = GetOrCreateArrayState(ctx);
+  if (state == nullptr) return BooleanVal::null();
+  DCHECK_GT(state->tuple_byte_size, 0);
+
+  const ColumnType& type = ColumnType::FromThrift(state->slot_desc->type());
+  int byte_size = type.GetByteSize();
+
+  uint8_t* tuple_ptr = arr.ptr;
+  for (int i = 0; i < arr.num_tuples; ++i, tuple_ptr += state->tuple_byte_size) {
+    Tuple* tuple = reinterpret_cast<Tuple*>(tuple_ptr);
+    if (IsElementNull(state, tuple)) continue;
+
+    void* slot_ptr = tuple->GetSlot(state->slot_offset);
+    bool equal = false;
+    switch (byte_size) {
+      case 4:
+        equal = (*reinterpret_cast<int32_t*>(slot_ptr) == item.val4);
+        break;
+      case 8:
+        equal = (*reinterpret_cast<int64_t*>(slot_ptr) == item.val8);
+        break;
+      case 16:
+        equal = (*reinterpret_cast<__int128_t*>(slot_ptr) == item.val16);
+        break;
+      default:
+        DCHECK(false) << "Invalid decimal byte size: " << byte_size;
+        return BooleanVal::null();
+    }
+
+    if (equal) return BooleanVal(true);
+  }
+  return BooleanVal(false);
+}
+
+BooleanVal CollectionFunctions::ArrayContainsDate(
+    FunctionContext* ctx, const CollectionVal& arr, const DateVal& item) {
+  return ArrayContainsPrimitive<int32_t>(ctx, arr, item);
 }
 
 }  // namespace impala

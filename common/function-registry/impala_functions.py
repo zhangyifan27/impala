@@ -761,6 +761,18 @@ visible_functions = [
  'impala::CollectionFunctions::ArrayContainsBoolean',
  'impala::CollectionFunctions::ArrayContainsPrepare',
  'impala::CollectionFunctions::ArrayContainsClose'],
+[['array_contains'], 'BOOLEAN', ['ARRAY<TIMESTAMP>', 'TIMESTAMP'],
+ 'impala::CollectionFunctions::ArrayContainsTimestamp',
+ 'impala::CollectionFunctions::ArrayContainsPrepare',
+ 'impala::CollectionFunctions::ArrayContainsClose'],
+[['array_contains'], 'BOOLEAN', ['ARRAY<DECIMAL>', 'DECIMAL'],
+ 'impala::CollectionFunctions::ArrayContainsDecimal',
+ 'impala::CollectionFunctions::ArrayContainsPrepare',
+ 'impala::CollectionFunctions::ArrayContainsClose'],
+[['array_contains'], 'BOOLEAN', ['ARRAY<DATE>', 'DATE'],
+ 'impala::CollectionFunctions::ArrayContainsDate',
+ 'impala::CollectionFunctions::ArrayContainsPrepare',
+ 'impala::CollectionFunctions::ArrayContainsClose'],
 
   # Utility functions
   [['uuid'], 'STRING', [],

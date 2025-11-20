@@ -31,6 +31,9 @@ using impala_udf::BigIntVal;
 using impala_udf::FloatVal;
 using impala_udf::DoubleVal;
 using impala_udf::StringVal;
+using impala_udf::TimestampVal;
+using impala_udf::DecimalVal;
+using impala_udf::DateVal;
 using impala_udf::CollectionVal;
 
 class CollectionFunctions {
@@ -57,6 +60,13 @@ class CollectionFunctions {
 
   static BooleanVal ArrayContainsString(
       FunctionContext* ctx, const CollectionVal& arr, const StringVal& item);
+
+  static BooleanVal ArrayContainsTimestamp(
+      FunctionContext* ctx, const CollectionVal& arr, const TimestampVal& item);
+  static BooleanVal ArrayContainsDecimal(
+      FunctionContext* ctx, const CollectionVal& arr, const DecimalVal& item);
+  static BooleanVal ArrayContainsDate(
+      FunctionContext* ctx, const CollectionVal& arr, const DateVal& item);
 };
 
 }  // namespace impala
