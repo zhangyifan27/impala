@@ -143,6 +143,50 @@ Fetched 0 row(s) in 0.11s
 +---+
 Fetched 3 row(s) in 0.11s</codeblock>
 
+      <p rev="IMPALA-8046">
+        Impala can derive column definitions from a raw ORC data file, even without an existing
+        Impala table. For example, you can create an external table pointing to an HDFS directory,
+        and base the column definitions on one of the files in that directory:
+      </p>
+
+<codeblock>CREATE EXTERNAL TABLE ingest_existing_files LIKE ORC '/user/etl/destination/datafile1.orc'
+  STORED AS ORC
+  LOCATION '/user/etl/destination';
+</codeblock>
+
+      <p>
+        Or, you can refer to an existing data file and create a new empty table with suitable
+        column definitions. Then you can use <codeph>INSERT</codeph> to create new data files or
+        <codeph>LOAD DATA</codeph> to transfer existing data files into the new table.
+      </p>
+
+<codeblock>CREATE TABLE columns_from_data_file LIKE ORC '/user/etl/destination/datafile1.orc'
+  STORED AS ORC;
+</codeblock>
+
+      <p>
+        The default properties of the newly created table are the same as for any other
+        <codeph>CREATE TABLE</codeph> statement. For example, the default file format is text;
+        if you want the new table to use the ORC file format, include the <codeph>STORED AS
+        ORC</codeph> clause also.
+      </p>
+
+      <p>
+        In this example, the new table is partitioned by year, month, and day. These partition
+        key columns are not part of the data file, so you specify them in the <codeph>CREATE
+        TABLE</codeph> statement:
+      </p>
+
+<codeblock>CREATE TABLE columns_from_data_file LIKE ORC '/user/etl/destination/datafile1.orc'
+  PARTITION (year INT, month TINYINT, day TINYINT)
+  STORED AS ORC;
+</codeblock>
+
+      <p>
+        See <xref href="impala_create_table.xml#create_table"/> for more details about the
+        <codeph>CREATE TABLE LIKE ORC</codeph> syntax.
+      </p>
+
     </conbody>
   </concept>
 
