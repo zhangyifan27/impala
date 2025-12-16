@@ -45,6 +45,7 @@ java_registry_preamble = '\
 \n\
 package org.apache.impala.builtins;\n\
 \n\
+import org.apache.impala.catalog.ArrayType;\n\
 import org.apache.impala.catalog.Type;\n\
 import org.apache.impala.catalog.Db;\n\
 \n\
@@ -82,6 +83,20 @@ def add_function(fn_meta_data, user_visible):
   meta_data_entries.append(entry)
 
 
+def convert_type_to_java(type_str):
+  """Convert a type string to Java Type expression.
+
+  Handles complex types like ARRAY<INT> by converting them to
+  new ArrayType(Type.INT).
+  """
+  if type_str.startswith("ARRAY<") and type_str.endswith(">"):
+    # Extract the element type from ARRAY<ELEMENT_TYPE>
+    element_type = type_str[6:-1]  # Remove "ARRAY<" and ">"
+    return "new ArrayType(Type.%s)" % element_type
+  else:
+    return "Type." + type_str
+
+
 def generate_fe_entry(entry, name):
   java_output = ""
   java_output += "\"" + name + "\""
@@ -105,9 +120,9 @@ def generate_fe_entry(entry, name):
   else:
     java_output += ", false"
 
-  java_output += ", Type." + entry["ret_type"]
+  java_output += ", " + convert_type_to_java(entry["ret_type"])
   for arg in entry["args"]:
-    java_output += ", Type." + arg
+    java_output += ", " + convert_type_to_java(arg)
   return java_output
 
 

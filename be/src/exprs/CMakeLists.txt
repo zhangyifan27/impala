@@ -31,6 +31,7 @@ add_library(ExprsIr
   ai-functions-ir.cc
   bit-byte-functions-ir.cc
   cast-functions-ir.cc
+  collection-functions-ir.cc
   compound-predicates-ir.cc
   conditional-functions-ir.cc
   datasketches-functions-ir.cc

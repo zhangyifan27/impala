@@ -122,6 +122,26 @@ public class StructType extends Type {
   }
 
   @Override
+  public String toString() {
+    return toSql();
+  }
+
+  @Override
+  public boolean matchesType(Type t) {
+    if (equals(t)) return true;
+    if (!t.isStructType()) return false;
+    StructType otherStructType = (StructType) t;
+    if (fields_.size() != otherStructType.fields_.size()) return false;
+    for (int i = 0; i < fields_.size(); ++i) {
+      if (!fields_.get(i).getType().matchesType(
+          otherStructType.fields_.get(i).getType())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
   public void toThrift(TColumnType container) {
     TTypeNode node = new TTypeNode();
     container.types.add(node);
