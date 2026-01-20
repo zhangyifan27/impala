@@ -3140,6 +3140,39 @@ where cast(get_json_object(t.json, '$.a.b.c') as int) > 1
 BIGINT
 ====
 ---- QUERY
+# Verify that quoted keys can be handled
+select get_json_object ('{"a.com":{"cnt":1}}', '$."a.com".cnt');
+---- RESULTS
+'1'
+---- TYPES
+STRING
+====
+---- QUERY
+# Verify that empty-string key can be resolved
+select get_json_object('{"":{"cnt":1}}', '$."".cnt');
+---- RESULTS
+'1'
+---- TYPES
+STRING
+====
+---- QUERY
+# Negative cases for quoted non-existing keys
+select
+  get_json_object('{"a.com":{"cnt":1}}', '$."a".com.cnt'),
+  get_json_object('{"":1}', '$."key"'),
+  get_json_object('{"key":1}', '$."another_key"');
+---- RESULTS
+'NULL','NULL','NULL'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# Negative case for missing closing quote
+select get_json_object('{"unquoted_key":1}', '$."unquoted_key');
+---- CATCH
+UDF ERROR: Failed to parse quoted key in json path '$."unquoted_key'
+====
+---- QUERY
 # IMPALA-6661 - NaN should not evaluate as the same as any other NaN via <=>
 WITH W AS (SELECT T.*, CAST(SQRT(X) AS FLOAT)  P, CAST(SQRT(Y) AS FLOAT) Q
 FROM (VALUES((CAST(-1.0 AS FLOAT) X, CAST(-1.0 AS FLOAT) Y), (-1.0, 0), (0, -1.0), (0, 0))) T )

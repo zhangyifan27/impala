@@ -111,6 +111,102 @@ TEST(CommaSeparatedContainsTest, Basic) {
   EXPECT_FALSE(CommaSeparatedContains("foo , foo, foo,\nfoo,\tfoo", "foo"));
 }
 
+TEST(ParseQuotedStringTest, HandlesEmptyAndEscapedContent) {
+  string empty_result = "pre-set";
+
+  // Test empty string
+  const string empty_input = "\"\"";
+  int consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(empty_input.data()),
+      reinterpret_cast<const uint8_t*>(empty_input.data() + empty_input.size()),
+      '"', &empty_result);
+  EXPECT_EQ(2, consumed);
+  EXPECT_TRUE(empty_result.empty());
+
+  // Test string containing escaped quote character (\")
+  string escaped_result;
+  const string escaped_input = "\"foo\\\"bar\"";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(escaped_input.data()),
+      reinterpret_cast<const uint8_t*>(escaped_input.data() + escaped_input.size()),
+      '"', &escaped_result);
+  EXPECT_EQ(static_cast<int>(escaped_input.size()), consumed);
+  EXPECT_EQ("foo\"bar", escaped_result);
+
+  // Test string containing escaped single quote character (\')
+  string single_quote_result;
+  const string single_quote_input = "'it\\'s'";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(single_quote_input.data()),
+      reinterpret_cast<const uint8_t*>(single_quote_input.data() +
+          single_quote_input.size()),
+      '\'', &single_quote_result);
+  EXPECT_EQ(static_cast<int>(single_quote_input.size()), consumed);
+  EXPECT_EQ("it's", single_quote_result);
+
+  // Test string containing tab character (\t)
+  string tab_result;
+  const string tab_input = "\"foo\\tbar\"";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(tab_input.data()),
+      reinterpret_cast<const uint8_t*>(tab_input.data() + tab_input.size()),
+      '"', &tab_result);
+  EXPECT_EQ(static_cast<int>(tab_input.size()), consumed);
+  EXPECT_EQ("footbar", tab_result);
+
+  // Test string containing escaped backslash and tab character (\\t)
+  string escaped_backslash_t_result;
+  const string escaped_backslash_t_input = "\"foo\\\tbar\"";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(escaped_backslash_t_input.data()),
+      reinterpret_cast<const uint8_t*>(escaped_backslash_t_input.data() +
+          escaped_backslash_t_input.size()),
+      '"', &escaped_backslash_t_result);
+  EXPECT_EQ(static_cast<int>(escaped_backslash_t_input.size()), consumed);
+  EXPECT_EQ("foo\tbar", escaped_backslash_t_result);
+
+  // Test string containing newline character (\n)
+  string newline_result;
+  const string newline_input = "\"foo\\nbar\"";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(newline_input.data()),
+      reinterpret_cast<const uint8_t*>(newline_input.data() +
+          newline_input.size()),
+      '"', &newline_result);
+  EXPECT_EQ(static_cast<int>(newline_input.size()), consumed);
+  EXPECT_EQ("foonbar", newline_result);
+
+  // Test string containing escaped backslash and newline character (\\n)
+  string escaped_backslash_n_result;
+  const string escaped_backslash_n_input = "\"foo\\\nbar\"";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(escaped_backslash_n_input.data()),
+      reinterpret_cast<const uint8_t*>(escaped_backslash_n_input.data() +
+          escaped_backslash_n_input.size()),
+      '"', &escaped_backslash_n_result);
+  EXPECT_EQ(static_cast<int>(escaped_backslash_n_input.size()), consumed);
+  EXPECT_EQ("foo\nbar", escaped_backslash_n_result);
+}
+
+TEST(ParseQuotedStringTest, HandlesInvalidInput) {
+  string result = "invalid";
+  const string no_quote_input = "not-quoted";
+  int consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(no_quote_input.data()),
+      reinterpret_cast<const uint8_t*>(no_quote_input.data() + no_quote_input.size()),
+      '"', &result);
+  EXPECT_EQ(-1, consumed);
+
+  const string unterminated_input = "\"unterminated";
+  consumed = ParseQuotedString(
+      reinterpret_cast<const uint8_t*>(unterminated_input.data()),
+      reinterpret_cast<const uint8_t*>(unterminated_input.data() +
+          unterminated_input.size()),
+      '"', &result);
+  EXPECT_EQ(-1, consumed);
+  EXPECT_TRUE(result.empty());
+}
+
 TEST(FindUtf8PosForwardTest, Basic) {
   // Each Chinese character is encoded into 3 bytes in UTF-8.
   EXPECT_EQ(0, FindUtf8PosForward("李小龙", 9, 0));

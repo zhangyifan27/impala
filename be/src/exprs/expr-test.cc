@@ -10486,6 +10486,13 @@ TEST_P(ExprTest, JsonTest) {
       "[1,2]");
   TestStringValue("get_json_object('{\"a\":1, \"1\":2, \"c\":3}', '$.1')", "2");
 
+  // Test about quoted keys
+  TestStringValue("get_json_object('{\"a\": 1}', '$.\"a\"')", "1");
+  TestStringValue("get_json_object('{\"a\": 1}', '$.\"b\"')", "NULL");
+  TestStringValue("get_json_object('{\"a.com\": 1}', '$.\"a.com\"')", "1");
+  TestStringValue("get_json_object('{\"a.com\": {\"cnt\": 1}}', '$.\"a.com\".cnt')", "1");
+  TestStringValue("get_json_object('{\"\": 1}', '$.\"\"')", "1");
+
   // Tests about NULL
   TestIsNull("get_json_object('{\"a\": 1}', '$.b')", TYPE_STRING);
   TestIsNull("get_json_object('{\"a\": 1}', '$[0]')", TYPE_STRING);
@@ -10498,6 +10505,7 @@ TEST_P(ExprTest, JsonTest) {
   TestIsNull("get_json_object('123', '$[0]')", TYPE_STRING);
   TestIsNull("get_json_object('{}', '$.a')", TYPE_STRING);
   TestIsNull("get_json_object('[]', '$[0]')", TYPE_STRING);
+  TestIsNull("get_json_object('{\"a.com\": 1}', '$.\"a\".com')", TYPE_STRING);
   TestStringValue("get_json_object('[0, 1, null, 2, 3]', '$[*]')", "[0,1,null,2,3]");
   TestStringValue("get_json_object('[{\"a\": null}, {\"a\": \"NULL\"}]', '$[*].a')",
       "[null,\"NULL\"]");
@@ -10577,6 +10585,10 @@ TEST_P(ExprTest, JsonTest) {
   TestErrorString("get_json_object('[1,2,3]', '')", "Empty json path\n");
   TestErrorString("get_json_object('[1,2,3]', '   ')",
       "Failed to parse json path '   ': Should start with '$'\n");
+  TestErrorString("get_json_object('{\"\": 1}', '$.')",
+      "Failed to parse json path '$.': Found a trailing '.'");
+  TestErrorString("get_json_object('{\"unquoted_key\":1}', '$.\"unquoted_key')",
+      "Failed to parse quoted key in json path '$.\"unquoted_key'");
 }
 
 TEST_P(ExprTest, MaskShowFirstNTest) {

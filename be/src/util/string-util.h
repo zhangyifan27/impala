@@ -52,6 +52,17 @@ bool EndsWith(const std::string& full_string, const std::string& end);
 /// the given string is located at [start, end)
 const uint8_t* FindEndOfIdentifier(const uint8_t* start, const uint8_t* end);
 
+/// Parse a string delimited by quote_char and store the unquoted, unescaped content in
+/// 'result'.
+/// The range [start, end) must begin with quote_char.
+/// Returns the number of characters consumed including both quotes on success;
+/// returns -1 if the input does not start with quote_char, the closing quote is missing,
+/// or the arguments are invalid. In all error cases 'result' is cleared.
+/// A backslash escapes the following character (e.g. \" or \\) and the escaped character
+/// is appended to result literally.
+int ParseQuotedString(const uint8_t* start, const uint8_t* end, char quote_char,
+    std::string* result);
+
 /// Finds the N-th (0-based) Unicode character in the string, returns the start byte
 /// position of it. The input string 'str_ptr' is viewed logically as sequence of Unicode
 /// characters encoded in UTF8. 'index' is the index (0-based) of Unicode character whose

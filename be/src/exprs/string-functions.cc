@@ -160,6 +160,7 @@ static StringVal ToStringVal(FunctionContext* ctx, const JsonUdfValue& values,
 static void SelectByKey(const string& key, JsonUdfValue* queue,
     JsonUdfAllocator* allocator) {
   SizeType old_items = queue->Size();  // RapidJson uses SizeType instead of size_t
+  if (old_items == 0) return;
   JsonUdfValue item;
   for (SizeType i = 0; i < old_items; ++i) {
     item = (*queue)[i];
@@ -175,6 +176,7 @@ static void SelectByIndex(const int index, JsonUdfValue* queue,
     JsonUdfAllocator* allocator) {
   DCHECK(queue->IsArray());
   SizeType old_items = queue->Size();
+  if (old_items == 0) return;
   for (SizeType i = 0; i < old_items; ++i) {
     JsonUdfValue& item = (*queue)[i];
     if (!item.IsArray() || index >= item.Capacity()) continue;
@@ -187,6 +189,7 @@ static void SelectByIndex(const int index, JsonUdfValue* queue,
 static void ExpandArrays(JsonUdfValue* queue, JsonUdfAllocator* allocator) {
   DCHECK(queue->IsArray());
   SizeType old_items = queue->Size();
+  if (old_items == 0) return;
   for (SizeType i = 0; i < old_items; ++i) {
     if (!(*queue)[i].IsArray()) continue;
     for (auto& v : (*queue)[i].GetArray()) queue->PushBack(v, *allocator);
@@ -197,6 +200,7 @@ static void ExpandArrays(JsonUdfValue* queue, JsonUdfAllocator* allocator) {
 // Extract all values of the objects in queue and replace the contents of queue with them
 static void ExtractValues(JsonUdfValue* queue, JsonUdfAllocator* allocator) {
   SizeType old_items = queue->Size();
+  if (old_items == 0) return;
   for (SizeType i = 0; i < old_items; ++i) {
     if (!(*queue)[i].IsObject()) continue;
     for (auto& m : (*queue)[i].GetObject()) queue->PushBack(m.value, *allocator);
@@ -333,6 +337,7 @@ StringVal StringFunctions::GetJsonObjectImpl(FunctionContext* ctx,
   RETURN_NULL_IF_OOM(queue.PushBack(document, allocator));
   const uint8_t* path = path_str.ptr;
   const uint8_t* path_end = path + path_str.len;
+  DCHECK_LE(path_end - path, StringVal::MAX_LENGTH);
   for (int i = beg + 1; i < path_str.len;) {
     // Each round we extract new items into the queue. Old items will be removed.
     switch (path[i]) {
@@ -358,20 +363,36 @@ StringVal StringFunctions::GetJsonObjectImpl(FunctionContext* ctx,
           if (i < 0) return StringVal::null();
           break;
         }
-        const uint8_t* start = path + i;
-        const uint8_t* end = FindEndOfIdentifier(start, path_end);
-        // Set error if looking for an empty key
-        if (end == nullptr) {
-          string msg = Substitute(
-              "Failed to parse json path '$0': Expected key at position $1",
-              AnyValUtil::ToString(path_str), i);
-          ctx->SetError(msg.c_str());
-          return StringVal::null();
+        // Check if the key is quoted (starts with ")
+        string key;
+        constexpr char quote_char = '"';
+        if (path[i] == quote_char) {
+          int consumed = ParseQuotedString(path + i, path_end, quote_char, &key);
+          if (consumed == -1) {
+            string msg = Substitute("Failed to parse quoted key in json path '$0'",
+                AnyValUtil::ToString(path_str));
+            ctx->SetError(msg.c_str());
+            return StringVal::null();
+          }
+          // Move to the next character after the quoted string
+          i += consumed;
+        } else {
+          // Use existing identifier parsing for unquoted keys
+          const uint8_t* start = path + i;
+          const uint8_t* end = FindEndOfIdentifier(start, path_end);
+          // Set error if looking for an empty key
+          if (end == nullptr) {
+            string msg = Substitute(
+                "Failed to parse json path '$0': Expected key at position $1",
+                AnyValUtil::ToString(path_str), i);
+            ctx->SetError(msg.c_str());
+            return StringVal::null();
+          }
+          // Convert to string to automatically null terminate.
+          key = string(start, end);
+          i += (end - start);
         }
-        // Convert to string to automatically null terminate.
-        string key = string(start, end);
         RETURN_NULL_IF_OOM(SelectByKey(key, &queue, &allocator));
-        i += (end - start);
         break;
       }
       case '[': {
