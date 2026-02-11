@@ -1317,6 +1317,15 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
       List<TupleId> tids = new ArrayList<>();
       e.getIds(tids, null);
       if (tids.isEmpty()) {
+        // Do not migrate anti-join conjuncts (e.g., ON FALSE) into the inline view.
+        // For anti-joins, a constant FALSE in the ON clause means no rows from the
+        // right table will match, so the correct behavior depends on the join
+        // type (LEFT ANTI returns all left rows, RIGHT ANTI returns all right rows).
+        // Migrating such conjuncts would incorrectly mark the inline view as having an
+        // empty result set.
+        if (analyzer.isAntiJoinedConjunct(e)) {
+          continue;
+        }
         evalInInlineViewPreds.add(e);
       } else if (e.isOnClauseConjunct()) {
         if (!analyzer.canEvalOnClauseConjunct(tupleIds, e)) continue;
@@ -2083,8 +2092,8 @@ public class SingleNodePlanner implements SingleNodePlannerIntf {
       // Unassigned conjuncts bound by the invisible tuple id of a semi join must have
       // come from the join's On-clause, and therefore, must be added to the other join
       // conjuncts to produce correct results.
-      // TODO This doesn't handle predicates specified in the On clause which are not
-      // bound by any tuple id (e.g. ON (true))
+      // Note: Constant predicates in the On clause (e.g. ON TRUE, ON FALSE) are now
+      // handled correctly through canEvalPredicate() and canEvalAntiJoinedConjunct().
       List<TupleId> tblRefIds = Lists.newArrayList(outer.getTblRefIds());
       tblRefIds.addAll(inner.getTblRefIds());
       otherJoinConjuncts = analyzer.getUnassignedConjuncts(tblRefIds, false);
