@@ -156,6 +156,29 @@ struct ColumnType {
     return ret;
   }
 
+   static ColumnType CreateArrayType(const ColumnType& element_type) {
+    ColumnType ret;
+    ret.type = TYPE_ARRAY;
+    ret.children.push_back(element_type);
+    return ret;
+  }
+
+  static ColumnType CreateMapType(const ColumnType& key_type,
+      const ColumnType& value_type) {
+    ColumnType ret;
+    ret.type = TYPE_MAP;
+    ret.children.push_back(key_type);
+    ret.children.push_back(value_type);
+    return ret;
+  }
+
+  static ColumnType CreateStructType(const std::vector<ColumnType>& children) {
+    ColumnType ret;
+    ret.type = TYPE_STRUCT;
+    ret.children = children;
+    return ret;
+  }
+
   // Matches the results of createAdjustedDecimalType in front-end code.
   static ColumnType CreateAdjustedDecimalType(int precision, int scale) {
     if (precision > MAX_PRECISION) {

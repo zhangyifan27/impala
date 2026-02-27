@@ -90,8 +90,22 @@ FunctionContext::TypeDesc AnyValUtil::ColumnTypeToTypeDesc(const ColumnType& typ
     case TYPE_DATE:
       out.type = FunctionContext::TYPE_DATE;
       break;
+    case TYPE_ARRAY:
+      out.type = FunctionContext::TYPE_ARRAY;
+      DCHECK_EQ(type.children.size(), 1);
+      out.children.push_back(ColumnTypeToTypeDesc(type.children[0]));
+      break;
+    case TYPE_MAP:
+      out.type = FunctionContext::TYPE_MAP;
+      DCHECK_EQ(type.children.size(), 2);
+      out.children.push_back(ColumnTypeToTypeDesc(type.children[0]));
+      out.children.push_back(ColumnTypeToTypeDesc(type.children[1]));
+      break;
     case TYPE_STRUCT:
       out.type = FunctionContext::TYPE_STRUCT;
+      for (const ColumnType& child : type.children) {
+        out.children.push_back(ColumnTypeToTypeDesc(child));
+      }
       break;
     default:
       DCHECK(false) << "Unknown type: " << type;
@@ -137,6 +151,24 @@ ColumnType AnyValUtil::TypeDescToColumnType(const FunctionContext::TypeDesc& typ
       return ColumnType::CreateVarcharType(type.len);
     case FunctionContext::TYPE_DATE:
       return ColumnType(TYPE_DATE);
+    case FunctionContext::TYPE_ARRAY: {
+      DCHECK_EQ(type.children.size(), 1);
+      ColumnType element_type = TypeDescToColumnType(type.children[0]);
+      return ColumnType::CreateArrayType(element_type);
+    }
+    case FunctionContext::TYPE_MAP: {
+      DCHECK_EQ(type.children.size(), 2);
+      ColumnType key_type = TypeDescToColumnType(type.children[0]);
+      ColumnType value_type = TypeDescToColumnType(type.children[1]);
+      return ColumnType::CreateMapType(key_type, value_type);
+    }
+    case FunctionContext::TYPE_STRUCT: {
+      vector<ColumnType> children;
+      for (const FunctionContext::TypeDesc& child : type.children) {
+        children.push_back(TypeDescToColumnType(child));
+      }
+      return ColumnType::CreateStructType(children);
+    }
     default:
       DCHECK(false) << "Unknown type: " << type.type;
       return ColumnType(INVALID_TYPE);
