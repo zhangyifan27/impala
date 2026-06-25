@@ -46,12 +46,12 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.types.Types;
 import org.apache.impala.authorization.AuthorizationChecker;
 import org.apache.impala.authorization.AuthorizationPolicy;
 import org.apache.impala.catalog.CatalogException;
 import org.apache.impala.catalog.DataSource;
+import org.apache.impala.catalog.FeIcebergTable;
 import org.apache.impala.catalog.FileDescriptor;
 import org.apache.impala.catalog.Function;
 import org.apache.impala.catalog.HdfsCachePool;
@@ -72,7 +72,7 @@ import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.Pair;
 import org.apache.impala.compat.MetastoreShim;
 import org.apache.impala.thrift.TBriefTableMeta;
-import org.apache.impala.thrift.TIcebergContentFileStore;
+import org.apache.impala.thrift.TIcebergPartitionStats;
 import org.apache.impala.thrift.TIcebergTable;
 import org.apache.impala.thrift.TNetworkAddress;
 import org.apache.impala.thrift.TPartialTableInfo;
@@ -249,6 +249,14 @@ public class IcebergMetaProvider implements MetaProvider {
       throws MetaException, TException {
     TableMetaRefImpl ref = (TableMetaRefImpl)table;
     Preconditions.checkState(!ref.isPartitioned());
+    return loadPartitionListHelper();
+  }
+
+  /**
+   * Helper method to load partition list for Iceberg tables.
+   * Iceberg tables are always handled as unpartitioned in catalog.
+   */
+  public static List<PartitionRef> loadPartitionListHelper() {
     return ImmutableList.of(new PartitionRefImpl(PartitionRefImpl.UNPARTITIONED_NAME));
   }
 
@@ -263,21 +271,18 @@ public class IcebergMetaProvider implements MetaProvider {
       TableMetaRef table, List<String> partitionColumnNames,
       ListMap<TNetworkAddress> hostIndex,
       List<PartitionRef> partitionRefs) throws CatalogException, TException {
-    Map<String, PartitionMetadata> ret = new HashMap<>();
-    ret.put("", new PartitionMetadataImpl(((TableMetaRefImpl)table).msTable_));
-    return ret;
+    TableMetaRefImpl ref = (TableMetaRefImpl)table;
+    return loadPartitionsByRefsHelper(ref.msTable_);
   }
 
   /**
-   * We model partitions slightly differently to Hive. So, in the case of an
-   * unpartitioned table, we have to create a fake Partition object which has the
-   * metadata of the table.
+   * Helper method to load dummy partition for Iceberg tables.
+   * Iceberg tables are always handled as unpartitioned in catalog.
    */
-  private Map<String, PartitionMetadata> loadUnpartitionedPartition(
-      TableMetaRefImpl table, List<PartitionRef> partitionRefs,
-      ListMap<TNetworkAddress> hostIndex) throws CatalogException {
+  public static Map<String, PartitionMetadata> loadPartitionsByRefsHelper(
+      Table msTable) throws CatalogException {
     Map<String, PartitionMetadata> ret = new HashMap<>();
-    ret.put("", new PartitionMetadataImpl(((TableMetaRefImpl)table).msTable_));
+    ret.put("", new PartitionMetadataImpl(msTable));
     return ret;
   }
 
@@ -511,6 +516,7 @@ public class IcebergMetaProvider implements MetaProvider {
       ret.add(VirtualColumn.PARTITION_SPEC_ID);
       ret.add(VirtualColumn.ICEBERG_PARTITION_SERIALIZED);
       ret.add(VirtualColumn.ICEBERG_DATA_SEQUENCE_NUMBER);
+      ret.add(VirtualColumn.ICEBERG_FIRST_ROW_ID);
       return ret;
     }
 
@@ -522,6 +528,11 @@ public class IcebergMetaProvider implements MetaProvider {
     @Override
     public long getLoadedTimeMs() {
       return loadingTimeMs_;
+    }
+
+    @Override
+    public boolean isIceberg() {
+      return true;
     }
   }
 
@@ -552,11 +563,7 @@ public class IcebergMetaProvider implements MetaProvider {
       iceTable.setCatalog_snapshot_id(apiTable.currentSnapshot().snapshotId());
     }
     iceTable.setDefault_partition_spec_id(apiTable.spec().specId());
-    ListMap<TNetworkAddress> hostIndex = new ListMap<>();
-    iceTable.setContent_files(getTContentFileStore(table, apiTable, hostIndex));
-    iceTable.setPartition_stats(Collections.emptyMap());
     ret.setIceberg_table(iceTable);
-    ret.setNetwork_addresses(hostIndex.getList());
     return ret;
   }
 
@@ -566,25 +573,36 @@ public class IcebergMetaProvider implements MetaProvider {
     return ((TableMetaRefImpl)table).iceApiTbl_;
   }
 
-  public String getLocation(final TableMetaRef table) {
-    return ((TableMetaRefImpl)table).msTable_.getSd().getLocation();
+  @Override
+  public MetaProvider.CachedIcebergFiles
+      loadIcebergContentFileStore(final TableMetaRef table) throws TException {
+    // TODO: integrate with CatalogdMetadataProvider's cache somehow
+    TableMetaRefImpl tableRef = (TableMetaRefImpl) table;
+    ListMap<TNetworkAddress> hostIndex = new ListMap<>();
+    return getContentFileStore(tableRef.iceApiTbl_, hostIndex, true);
   }
 
-  private TIcebergContentFileStore getTContentFileStore(final TableMetaRef table,
-      org.apache.iceberg.Table apiTable, ListMap<TNetworkAddress> hostIndex) {
+  private static MetaProvider.CachedIcebergFiles getContentFileStore(
+      org.apache.iceberg.Table apiTable,
+      ListMap<TNetworkAddress> hostIndex, boolean loadPartStats) {
     try {
       TableScan scan = apiTable.newScan();
       GroupedContentFiles groupedFiles = new GroupedContentFiles(scan.planFiles());
       IcebergFileMetadataLoader iceFml = new IcebergFileMetadataLoader(
           apiTable, Collections.emptyList(), hostIndex, groupedFiles,
-          new ArrayList<>(), false);
+          Collections.emptyList(), false, null);
       iceFml.load();
       IcebergContentFileStore contentFileStore = new IcebergContentFileStore(apiTable,
           iceFml.getLoadedIcebergFds(), groupedFiles, iceFml.getIcebergPartitions());
-      return contentFileStore.toThrift();
+      Map<String, TIcebergPartitionStats> partStats = null;
+      if (loadPartStats) {
+        partStats = FeIcebergTable.Utils.loadPartitionStats(apiTable, groupedFiles, null);
+      }
+      return new MetaProvider.CachedIcebergFiles(contentFileStore, hostIndex, partStats);
     } catch (Exception e) {
       throw new IllegalStateException(
           "Exception occurred during loading Iceberg file metadata", e);
     }
   }
+
 }

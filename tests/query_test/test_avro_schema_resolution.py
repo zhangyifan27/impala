@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfCatalogV2
 
@@ -33,7 +31,7 @@ class TestAvroSchemaResolution(ImpalaTestSuite):
   def test_avro_schema_resolution(self, vector, unique_database):
     self.run_test_case('QueryTest/avro-schema-resolution', vector, unique_database)
 
-  def test_avro_c_lib_unicode_nulls(self, vector):
+  def test_avro_c_lib_unicode_nulls(self):
     """Test for IMPALA-1136 and IMPALA-2161 and unicode characters in the
     schema that were not handled correctly by the Avro C library.
     """

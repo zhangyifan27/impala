@@ -17,12 +17,16 @@
 
 package org.apache.impala.planner;
 
+import static org.apache.impala.util.IcebergUtil.getFilePathHash;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
+import java.nio.ByteBuffer;
 
 import org.apache.iceberg.Snapshot;
 import org.apache.impala.analysis.Analyzer;
@@ -39,8 +43,14 @@ import org.apache.impala.catalog.Type;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.ThriftSerializationCtx;
 import org.apache.impala.fb.FbIcebergDataFileFormat;
+import org.apache.impala.fb.FbIcebergDeletionVector;
 import org.apache.impala.thrift.TExplainLevel;
+import org.apache.impala.thrift.TFileSplitGeneratorSpec;
+import org.apache.impala.thrift.TIcebergDeletionVector;
 import org.apache.impala.thrift.TPlanNode;
+import org.apache.impala.thrift.TScanRange;
+import org.apache.impala.util.Hash128;
+import org.apache.impala.util.IcebergUtil;
 import org.apache.impala.util.MathUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +67,8 @@ public class IcebergScanNode extends HdfsScanNode {
   // partitioned tables, so partition range scans are scheduled more evenly.
   // See IMPALA-12765 for details.
   private List<IcebergFileDescriptor> fileDescs_;
+
+  private final Map<Hash128, TIcebergDeletionVector> dataFileToDV_;
 
   // Number of actual partitions in the table, inferred from file metadata.
   // We treat Iceberg tables as unpartitioned HDFS tables, so instead of storing the file
@@ -89,19 +101,23 @@ public class IcebergScanNode extends HdfsScanNode {
   public IcebergScanNode(PlanNodeId id, TableRef tblRef, List<Expr> conjuncts,
       MultiAggregateInfo aggInfo, List<IcebergFileDescriptor> fileDescs,
       int numPartitions,
-      List<Expr> nonIdentityConjuncts, List<Expr> skippedConjuncts, long snapshotId) {
+      List<Expr> nonIdentityConjuncts, List<Expr> skippedConjuncts, long snapshotId,
+      boolean isPartitionKeyScan, Map<Hash128, TIcebergDeletionVector> dataFileToDV,
+      ScanNodeHelper helper) {
     this(id, tblRef, conjuncts, aggInfo, fileDescs, numPartitions, nonIdentityConjuncts,
-        skippedConjuncts, null, snapshotId);
+        skippedConjuncts, null, snapshotId, isPartitionKeyScan, dataFileToDV, helper);
   }
 
   public IcebergScanNode(PlanNodeId id, TableRef tblRef, List<Expr> conjuncts,
       MultiAggregateInfo aggInfo, List<IcebergFileDescriptor> fileDescs,
       int numPartitions,
-      List<Expr> nonIdentityConjuncts, List<Expr> skippedConjuncts, PlanNodeId deleteId,
-      long snapshotId) {
+      List<Expr> nonIdentityConjuncts, List<Expr> skippedConjuncts,
+      PlanNodeId deleteId,
+      long snapshotId, boolean isPartitionKeyScan,
+      Map<Hash128, TIcebergDeletionVector> dataFileToDV, ScanNodeHelper helper) {
     super(id, tblRef.getDesc(), conjuncts,
         getIcebergPartition(((FeIcebergTable)tblRef.getTable()).getFeFsTable()), tblRef,
-        aggInfo, null, false);
+        aggInfo, null, isPartitionKeyScan, helper);
     // Hdfs table transformed from iceberg table only has one partition
     Preconditions.checkState(partitions_.size() == 1);
 
@@ -113,13 +129,15 @@ public class IcebergScanNode extends HdfsScanNode {
       // Create a clone of the original file descriptor list to avoid getting
       // ConcurrentModificationException when sorting.
       fileDescs_ = new ArrayList<>(fileDescs_);
-      Collections.sort(fileDescs_);
+      Collections.sort(fileDescs_,
+          (IcebergFileDescriptor a, IcebergFileDescriptor b) -> a.byteBufferCompareTo(b));
       filesAreSorted_ = true;
     }
     nonIdentityConjuncts_ = nonIdentityConjuncts;
     snapshotId_ = snapshotId;
     this.skippedConjuncts_ = skippedConjuncts;
     this.deleteFileScanNodeId = deleteId;
+    this.dataFileToDV_ = dataFileToDV;
   }
 
   /**
@@ -142,6 +160,8 @@ public class IcebergScanNode extends HdfsScanNode {
               cardinality_, iceFd.getFbFileMetadata().icebergMetadata().recordCount());
         }
       }
+    } else if (isPartitionKeyScan_) {
+      cardinality_ = fileDescs_.size();
     } else {
       for (IcebergFileDescriptor fd : fileDescs_) {
         cardinality_ = MathUtil.addCardinalities(
@@ -174,11 +194,12 @@ public class IcebergScanNode extends HdfsScanNode {
 
     cardinality_ = capCardinalityAtLimit(cardinality_);
 
-    if (countStarSlot_ != null) {
+    if (getCountStarSlot() != null) {
       // We are doing optimized count star. Override cardinality with total num files.
       inputCardinality_ = fileDescs_.size();
       cardinality_ = fileDescs_.size();
     }
+    tryUpdateCardinalityFromHbo(analyzer);
     if (LOG.isTraceEnabled()) {
       LOG.trace("IcebergScanNode: cardinality_=" + Long.toString(cardinality_));
     }
@@ -239,6 +260,13 @@ public class IcebergScanNode extends HdfsScanNode {
     return selectedPartitions.cardinality();
   }
 
+  @Override
+  public long getNumInputRows() {
+    return fileDescs_.stream()
+        .mapToLong(fd -> fd.getFbFileMetadata().icebergMetadata().recordCount())
+        .sum();
+  }
+
   // Returns the number of partitions in the current snapshot, cached by catalog after
   // loading. In case of time travel, the number of all partitions is not available
   // in the old snapshot, therefore this info is omitted from the explain string.
@@ -291,5 +319,49 @@ public class IcebergScanNode extends HdfsScanNode {
     if (hasParquet) fileFormats_.add(HdfsFileFormat.PARQUET);
     if (hasOrc) fileFormats_.add(HdfsFileFormat.ORC);
     if (hasAvro) fileFormats_.add(HdfsFileFormat.AVRO);
+  }
+
+  @Override
+  protected void decorateScanRange(FileDescriptor fileDesc, TScanRange scanRange) {
+    IcebergFileDescriptor iceFd = applyDeletionVector(fileDesc,
+        scanRange::setIceberg_deletion_vector);
+    scanRange.setFile_metadata(getIcebergSplitFileMetadata(iceFd));
+  }
+
+  @Override
+  protected void decorateSplitSpec(FileDescriptor fileDesc,
+      TFileSplitGeneratorSpec splitSpec) {
+    IcebergFileDescriptor iceFd = applyDeletionVector(fileDesc,
+        splitSpec::setIceberg_deletion_vector);
+    // Overwrite the raw FbFileMetadata (which only contains a part_id reference)
+    // with the denormalized FbSplitFileMetadata that includes the actual partition keys.
+    splitSpec.getFile_desc().setFile_metadata(getIcebergSplitFileMetadata(iceFd));
+  }
+
+  private IcebergFileDescriptor applyDeletionVector(FileDescriptor fileDesc,
+      Consumer<java.nio.ByteBuffer> dvSetter) {
+    Preconditions.checkState(fileDesc instanceof IcebergFileDescriptor);
+    IcebergFileDescriptor iceFd = (IcebergFileDescriptor) fileDesc;
+    if (dataFileToDV_ != null) {
+      String absPath = iceFd.getAbsolutePath(tbl_.getLocation());
+      Hash128 pathHash = getFilePathHash(absPath);
+      TIcebergDeletionVector delVec = dataFileToDV_.get(pathHash);
+      if (delVec != null) {
+        long recordCount = delVec.isSetRecord_count() ? delVec.getRecord_count() : 0;
+        FbIcebergDeletionVector fbIceDelVec = IcebergUtil.createFbIcebergDeletionVector(
+            delVec.getPath(), delVec.getContent_offset(),
+            delVec.getContent_size_in_bytes(), pathHash.getHigh(),
+            pathHash.getLow(), recordCount);
+        dvSetter.accept(fbIceDelVec.getByteBuffer());
+      }
+    }
+    return iceFd;
+  }
+
+  private ByteBuffer getIcebergSplitFileMetadata(IcebergFileDescriptor fileDesc) {
+    int partId = fileDesc.getFbFileMetadata().icebergMetadata().partId();
+    ByteBuffer partitionBuf =
+        ((FeIcebergTable) tbl_).getContentFileStore().getPartitionById(partId);
+    return IcebergUtil.transformFileMetadata(fileDesc, partitionBuf).getByteBuffer();
   }
 }

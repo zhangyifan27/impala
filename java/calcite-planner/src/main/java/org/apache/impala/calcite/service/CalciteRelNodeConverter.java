@@ -22,7 +22,6 @@ import com.google.common.collect.ImmutableList;
 import org.apache.calcite.avatica.util.Quoting;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
-import org.apache.calcite.plan.RelOptCostImpl;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptTable;
@@ -35,7 +34,6 @@ import org.apache.calcite.prepare.PlannerImpl;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.SqlBasicCall;
@@ -52,9 +50,11 @@ import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.impala.calcite.operators.ImpalaConvertletTable;
+import org.apache.impala.calcite.operators.ImpalaRexBuilder;
 import org.apache.impala.calcite.rules.ImpalaCoreRules;
-import org.apache.impala.calcite.rules.ImpalaRexExecutor;
+import org.apache.impala.calcite.rules.ImpalaMQContext;
 import org.apache.impala.calcite.rules.RemoveUnraggedCharCastRexExecutor;
+import org.apache.impala.calcite.schema.ImpalaCost;
 import org.apache.impala.calcite.schema.ImpalaRelMetadataProvider;
 import org.apache.impala.calcite.util.LogUtil;
 
@@ -83,15 +83,17 @@ public class CalciteRelNodeConverter implements CompilerStep {
 
   private final CalciteCatalogReader reader_;
 
+  private final ImpalaRexBuilder rexBuilder_;
+
   public CalciteRelNodeConverter(CalciteAnalysisResult analysisResult) {
     this.typeFactory_ = analysisResult.getTypeFactory();
     this.reader_ = analysisResult.getCatalogReader();
     this.sqlValidator_ = analysisResult.getSqlValidator();
-    this.planner_ = new VolcanoPlanner();
+    this.planner_ = new VolcanoPlanner(ImpalaCost.FACTORY, new ImpalaMQContext());
     planner_.addRelTraitDef(ConventionTraitDef.INSTANCE);
     planner_.setExecutor(new RemoveUnraggedCharCastRexExecutor());
-    cluster_ =
-        RelOptCluster.create(planner_, new RexBuilder(typeFactory_));
+    this.rexBuilder_ = new ImpalaRexBuilder(typeFactory_);
+    cluster_ = RelOptCluster.create(planner_, this.rexBuilder_);
     viewExpander_ = createViewExpander(
         analysisResult.getSqlValidator().getCatalogReader().getRootSchema().plus());
     cluster_.setMetadataProvider(ImpalaRelMetadataProvider.DEFAULT);
@@ -113,6 +115,7 @@ public class CalciteRelNodeConverter implements CompilerStep {
         // We need to add ConventionTraitDef.INSTANCE to avoid the call to
         // table.getStatistic() in LogicalTableScan#create().
         .traitDefs(ConventionTraitDef.INSTANCE)
+        .costFactory(ImpalaCost.FACTORY)
         .build();
     return new PlannerImpl(config);
   }
@@ -131,7 +134,8 @@ public class CalciteRelNodeConverter implements CompilerStep {
         cluster_,
         ImpalaConvertletTable.INSTANCE,
         SqlToRelConverter.config().withCreateValuesRel(false)
-            .withRelBuilderFactory(ImpalaCoreRules.LOGICAL_BUILDER_NO_SIMPLIFY));
+            .withRelBuilderFactory(ImpalaCoreRules.LOGICAL_BUILDER_NO_SIMPLIFY)
+            .withHintStrategyTable(ImpalaCoreRules.HINT_STRATEGIES));
 
     // Convert the valid AST into a logical plan
     RelRoot root = relConverter.convertQuery(validatedNode, false, true);
@@ -155,6 +159,8 @@ public class CalciteRelNodeConverter implements CompilerStep {
         RelDecorrelator.decorrelateQuery(subQueryRemovedPlan, relBuilder);
 
     LogUtil.logDebug(decorrelatedPlan, "Plan after subquery decorrelation phase");
+
+    rexBuilder_.setPostAnalysis();
     return decorrelatedPlan;
   }
 
@@ -232,7 +238,7 @@ public class CalciteRelNodeConverter implements CompilerStep {
 
     HepPlanner planner = new HepPlanner(builder.build(),
         currentNode.getCluster().getPlanner().getContext(),
-            false, null, RelOptCostImpl.FACTORY);
+            false, null, ImpalaCost.FACTORY);
     planner.setRoot(currentNode);
     return planner.findBestExp();
   }

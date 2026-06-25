@@ -19,7 +19,6 @@
 # programatically interact with the services and perform operations such as querying
 # the debug webpage, getting metric values, or creating client connections.
 
-from __future__ import absolute_import, division, print_function
 from collections import defaultdict
 from datetime import datetime
 import json
@@ -128,6 +127,17 @@ class BaseImpalaService(object):
     varz = self.get_debug_webpage_json("varz")
     for var in varz.get("flags"):
       flags[var['name']] = var['current']
+    return flags
+
+  def get_hadoop_config_value(self, key):
+    """Returns the hadoop configuration from the /hadoop-varz debug webpage."""
+    return self.get_hadoop_configs()[key]
+
+  def get_hadoop_configs(self):
+    """Returns the hadoop configuration from the /hadoop-varz debug webpage."""
+    flags = dict()
+    for config in self.get_debug_webpage_json("hadoop-varz")["configs"]:
+      flags[config['key']] = config['value']
     return flags
 
   def wait_for_metric_value(self, metric_name, expected_value, timeout=10, interval=1,

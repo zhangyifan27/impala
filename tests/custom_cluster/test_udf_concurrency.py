@@ -15,14 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import os
 import pytest
 import random
 import threading
 import time
-from subprocess import check_call
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
 from tests.common.impala_cluster import ImpalaCluster
@@ -47,7 +44,7 @@ class TestUdfConcurrency(CustomClusterTestSuite):
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(impalad_args="--fe_service_threads=1000")
-  def test_native_functions_race(self, vector, unique_database):
+  def test_native_functions_race(self, unique_database):
     """ IMPALA-6488: stress concurrent adds, uses, and deletes of native functions.
         Exposes a crash caused by use-after-free in lib-cache."""
 
@@ -131,7 +128,7 @@ class TestUdfConcurrency(CustomClusterTestSuite):
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(impalad_args="--fe_service_threads=1000")
-  def test_concurrent_jar_drop_use(self, vector, unique_database):
+  def test_concurrent_jar_drop_use(self, unique_database):
     """IMPALA-6215: race between dropping/using java udf's defined in the same jar.
        This test runs concurrent drop/use threads that result in class not found
        exceptions when the race is present.

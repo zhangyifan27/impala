@@ -24,7 +24,6 @@ import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlCharStringLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
-import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -49,18 +48,9 @@ public class ImpalaTypeCoercionImpl extends TypeCoercionImpl {
   @Override
   public RelDataType getWiderTypeFor(List<RelDataType> typeList,
       boolean stringPromotion) {
-    // a little hack. At type coercion (validation) time, we can't tell if the type
-    // is a char column or a char literal.  The problem is that Calcite, as is, treats
-    // char literals as char type instead of STRING. Let's treat all char types as
-    // STRING right now. If it does turn out to be a real CHAR column, this will
-    // be caught when resolving functions.
     List<RelDataType> newTypeList = new ArrayList<>();
     for (RelDataType type : typeList) {
-      if (type.getSqlTypeName().equals(SqlTypeName.CHAR)) {
-        newTypeList.add(ImpalaTypeConverter.getRelDataType(Type.STRING));
-      } else {
-        newTypeList.add(type);
-      }
+      newTypeList.add(type);
     }
 
     return ImpalaTypeConverter.getCompatibleType(newTypeList, factory);

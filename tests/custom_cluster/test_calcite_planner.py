@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import logging
 import pytest
 
@@ -34,17 +33,10 @@ class TestCalcitePlanner(CustomClusterTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestCalcitePlanner, cls).add_test_dimensions()
-    add_mandatory_exec_option(cls, 'use_calcite_planner', 'true')
+    add_mandatory_exec_option(cls, 'planner', 'CALCITE')
+    add_mandatory_exec_option(cls, 'fallback_planner', 'CALCITE')
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(start_args="--env_vars=USE_CALCITE_PLANNER=true")
   def test_calcite_frontend(self, vector, unique_database):
-    """Calcite planner does not work in local catalog mode yet."""
     self.run_test_case('QueryTest/calcite', vector, use_db=unique_database)
-
-  @pytest.mark.execute_serially
-  @CustomClusterTestSuite.with_args(start_args="--env_vars=USE_CALCITE_PLANNER=true")
-  def test_semicolon(self):
-    with self.create_impala_client() as client:
-      client.execute("set use_calcite_planner=true;")
-      client.execute("select 4;")

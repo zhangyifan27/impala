@@ -30,6 +30,7 @@
 #include <gutil/strings/util.h>
 
 #include "common/status.h"
+#include "common/status-serialization.h"
 #include "gen-cpp/StatestoreService_types.h"
 #include "rpc/rpc-trace.h"
 #include "rpc/thrift-util.h"
@@ -171,6 +172,7 @@ DECLARE_string(ssl_private_key);
 DECLARE_string(ssl_private_key_password_cmd);
 DECLARE_string(ssl_cipher_list);
 DECLARE_string(ssl_minimum_version);
+DECLARE_string(tls_ciphersuites);
 #ifndef NDEBUG
 DECLARE_int32(stress_statestore_startup_delay_ms);
 #endif
@@ -276,7 +278,7 @@ class StatestoreThriftIf : public StatestoreServiceIf {
       Status status = Status(TErrorCode::STATESTORE_INCOMPATIBLE_PROTOCOL,
           params.subscriber_id, params.protocol_version + 1,
           statestore_->GetProtocolVersion() + 1);
-      status.ToThrift(&response.status);
+      StatusToThrift(status, &response.status);
       return;
     }
     TStatestoreSubscriberType::type subscriber_type = TStatestoreSubscriberType::UNKNOWN;
@@ -301,7 +303,7 @@ class StatestoreThriftIf : public StatestoreServiceIf {
         params.subscriber_location, params.topic_registrations, subscriber_type,
         subscribe_catalogd_change, catalogd_registration, &registration_id,
         &has_active_catalogd, &active_catalogd_version, &active_catalogd_registration);
-    status.ToThrift(&response.status);
+    StatusToThrift(status, &response.status);
     response.__set_registration_id(registration_id);
     response.__set_statestore_id(statestore_->GetStateStoreId());
     response.__set_protocol_version(statestore_->GetProtocolVersion());
@@ -323,7 +325,7 @@ class StatestoreThriftIf : public StatestoreServiceIf {
     response.__set_protocol_version(statestore_->GetProtocolVersion());
     response.__set_statestore_id(statestore_->GetStateStoreId());
     Status status = Status::OK();
-    status.ToThrift(&response.status);
+    StatusToThrift(status, &response.status);
     return;
   }
 
@@ -336,7 +338,7 @@ class StatestoreThriftIf : public StatestoreServiceIf {
       statestore_->SetStatestoreDebugAction(disable_network);
     }
     Status status = Status::OK();
-    status.ToThrift(&response.status);
+    StatusToThrift(status, &response.status);
     return;
   }
 
@@ -362,7 +364,7 @@ class StatestoreHaThriftIf : public StatestoreHaServiceIf {
       Status status = Status(TErrorCode::STATESTORE_INCOMPATIBLE_PROTOCOL,
           statestore_->GetPeerStatestoreHaAddress(), params.src_protocol_version + 1,
           statestore_->GetProtocolVersion() + 1);
-      status.ToThrift(&response.status);
+      StatusToThrift(status, &response.status);
       return;
     } else if (params.src_statestore_id == statestore_->GetStateStoreId()) {
       // Ignore request sent by itself.
@@ -371,7 +373,7 @@ class StatestoreHaThriftIf : public StatestoreHaServiceIf {
     bool dst_statestore_active = false;
     Status status = statestore_->ReceiveHaHandshakeRequest(params.src_statestore_id,
         params.src_statestore_address, params.src_force_active, &dst_statestore_active);
-    status.ToThrift(&response.status);
+    StatusToThrift(status, &response.status);
     response.__set_dst_protocol_version(statestore_->GetProtocolVersion());
     response.__set_dst_statestore_id(statestore_->GetStateStoreId());
     response.__set_dst_statestore_active(dst_statestore_active);
@@ -386,12 +388,12 @@ class StatestoreHaThriftIf : public StatestoreHaServiceIf {
           Status(TErrorCode::STATESTORE_INCOMPATIBLE_PROTOCOL,
               statestore_->GetPeerStatestoreHaAddress(), params.protocol_version + 1,
               statestore_->GetProtocolVersion() + 1);
-      status.ToThrift(&response.status);
+      StatusToThrift(status, &response.status);
       return;
     }
     statestore_->HaHeartbeatRequest(params.dst_statestore_id, params.src_statestore_id);
     Status status = Status::OK();
-    status.ToThrift(&response.status);
+    StatusToThrift(status, &response.status);
   }
 
  private:
@@ -796,7 +798,8 @@ Status Statestore::Init(int32_t state_store_port) {
     builder.ssl(FLAGS_ssl_server_certificate, FLAGS_ssl_private_key)
         .pem_password_cmd(FLAGS_ssl_private_key_password_cmd)
         .ssl_version(ssl_version)
-        .cipher_list(FLAGS_ssl_cipher_list);
+        .cipher_list(FLAGS_ssl_cipher_list)
+        .tls_ciphersuites(FLAGS_tls_ciphersuites);
   }
   RETURN_IF_ERROR(subscriber_topic_update_threadpool_.Init());
   RETURN_IF_ERROR(subscriber_priority_topic_update_threadpool_.Init());
@@ -1096,7 +1099,7 @@ Status Statestore::SendTopicUpdate(Subscriber* subscriber, UpdateKind update_kin
   StatsMetric<double>* update_duration_metric =
       update_kind == UpdateKind::PRIORITY_TOPIC_UPDATE ?
       priority_topic_update_duration_metric_ : topic_update_duration_metric_;
-  status = Status(response.status);
+  status = StatusFromThrift(response.status);
   if (!status.ok()) {
     update_duration_metric->Update(sw.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
     return status;
@@ -1844,7 +1847,8 @@ Status Statestore::InitStatestoreHa(
     builder.ssl(FLAGS_ssl_server_certificate, FLAGS_ssl_private_key)
         .pem_password_cmd(FLAGS_ssl_private_key_password_cmd)
         .ssl_version(ssl_version)
-        .cipher_list(FLAGS_ssl_cipher_list);
+        .cipher_list(FLAGS_ssl_cipher_list)
+        .tls_ciphersuites(FLAGS_tls_ciphersuites);
   }
   ThriftServer* ha_server;
   RETURN_IF_ERROR(builder.metrics(metrics_).Build(&ha_server));
@@ -1877,7 +1881,7 @@ Status Statestore::InitStatestoreHa(
     found_peer_ = false;
     connected_peer_metric_->SetValue(found_peer_);
   } else {
-    status = Status(response.status);
+    status = StatusFromThrift(response.status);
     DCHECK(status.ok());
     lock_guard<mutex> l(ha_lock_);
     peer_statestore_id_ = response.dst_statestore_id;
@@ -2032,7 +2036,7 @@ void Statestore::HaHeartbeatRequest(const TUniqueId& dst_statestore_id,
       TStatestoreHaHandshakeResponse response;
       Status status = SendHaHandshake(&response);
       if (!status.ok()) continue;
-      status = Status(response.status);
+      status = StatusFromThrift(response.status);
       DCHECK(status.ok());
 
       lock_guard<mutex> l(ha_lock_);
@@ -2182,7 +2186,7 @@ Status Statestore::SendHaHeartbeat() {
       request, &response);
   ha_standby_ss_failure_detector_->UpdateHeartbeat(STATESTORE_ID, status.ok());
   if (status.ok()) {
-    status = Status(response.status);
+    status = StatusFromThrift(response.status);
   }
   return status;
 }

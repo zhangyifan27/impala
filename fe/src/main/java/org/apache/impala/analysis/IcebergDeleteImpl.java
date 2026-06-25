@@ -21,15 +21,12 @@ import java.util.List;
 
 import org.apache.iceberg.TableProperties;
 import org.apache.impala.catalog.FeIcebergTable;
+import org.apache.impala.catalog.IcebergContentFileStore;
 import org.apache.impala.common.AnalysisException;
-import org.apache.impala.common.Pair;
 import org.apache.impala.planner.DataSink;
 import org.apache.impala.planner.IcebergBufferedDeleteSink;
-import org.apache.impala.planner.TableSink;
-import org.apache.impala.thrift.TSortingOrder;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
 import org.apache.impala.util.ExprUtil;
 
 public class IcebergDeleteImpl extends IcebergModifyImpl {
@@ -40,6 +37,26 @@ public class IcebergDeleteImpl extends IcebergModifyImpl {
   @Override
   public void analyze(Analyzer analyzer) throws AnalysisException {
     super.analyze(analyzer);
+    if (originalTargetTable_.getFormatVersion() > 3) {
+      throw new AnalysisException(String.format(
+          "Impala does not support DELETE statements on Iceberg tables with format " +
+              "version %d", originalTargetTable_.getFormatVersion()));
+    }
+
+    if (originalTargetTable_.getFormatVersion() >= 3) {
+      IcebergContentFileStore fileStore = originalTargetTable_.getContentFileStore();
+      int positionDeletes = fileStore.getPositionDeleteFiles().size();
+      if (positionDeletes > 0) {
+        throw new AnalysisException(String.format(
+            "DELETE is not allowed on Iceberg format version 3 table '%s' as it "
+                + "has existing version 2 position delete file(s): "
+                + "%d position delete file(s). Run 'OPTIMIZE TABLE %s' to rewrite the "
+                + "files and remove deletion files before attempting DELETE.",
+            originalTargetTable_.getFullName(), positionDeletes,
+            originalTargetTable_.getFullName()));
+      }
+    }
+
     // Make the virtual position delete table the new target table.
     modifyStmt_.setTargetTable(icePosDelTable_);
 
@@ -57,12 +74,24 @@ public class IcebergDeleteImpl extends IcebergModifyImpl {
       throws AnalysisException {
     deletePartitionKeyExprs_ = getDeletePartitionExprs(analyzer);
     deleteResultExprs_ = getDeleteResultExprs(analyzer);
+    shuffleExprs_ = buildShuffleExprs(analyzer);
     selectList.addAll(ExprUtil.exprsAsSelectList(deletePartitionKeyExprs_));
     selectList.addAll(ExprUtil.exprsAsSelectList(deleteResultExprs_));
+    if (originalTargetTable_.getFormatVersion() >= 3 &&
+        !originalTargetTable_.isPartitioned()) {
+      // For V3 tables, we need to add file name to the select list for shuffle to ensure
+      // that all rows from the same file are shuffled to the same node.
+      selectList.addAll(ExprUtil.exprsAsSelectList(shuffleExprs_));
+    }
   }
 
   @Override
   public List<Expr> getPartitionKeyExprs() { return deletePartitionKeyExprs_; }
+
+  @Override
+  protected List<Expr> getPartitionedShuffleExprs() {
+    return getPartitionKeyExprs();
+  }
 
   @Override
   public void addCastsToAssignmentsInSourceStmt(Analyzer analyzer)

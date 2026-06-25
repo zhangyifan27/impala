@@ -349,6 +349,10 @@ public class BackendConfig {
     return backendCfg_.hms_event_incremental_refresh_transactional_table;
   }
 
+  public int getHmsEventCatchUpThreshold() {
+    return backendCfg_.hms_event_catchup_threshold_s;
+  }
+
   public boolean isAutoCheckCompaction() {
     return backendCfg_.auto_check_compaction;
   }
@@ -433,10 +437,6 @@ public class BackendConfig {
 
   public float getScanRangeCostFactor() {
     return (float) backendCfg_.scan_range_cost_factor;
-  }
-
-  public boolean useJammWeigher() {
-    return backendCfg_.use_jamm_weigher;
   }
 
   public boolean icebergAllowDatafileInTableLocationOnly() {
@@ -631,5 +631,25 @@ public class BackendConfig {
 
   public void setDisableHmsSyncByDefault(boolean disableHmsSyncByDefault) {
     backendCfg_.disable_hms_sync_by_default = disableHmsSyncByDefault;
+  }
+
+  public boolean isOtelTraceEnabled() {
+    return backendCfg_.otel_trace_enabled;
+  }
+
+  public double getHboSimilarityThreshold() {
+    return backendCfg_.hbo_similarity_threshold;
+  }
+
+  public int getHboMaxRunsPerKey() {
+    return backendCfg_.hbo_max_runs_per_key;
+  }
+
+  public long getHboInMemoryBackendCacheSizeBytes() {
+    return backendCfg_.hbo_in_memory_backend_cache_size_bytes;
+  }
+
+  public int getUnregistrationThreadPoolSize() {
+    return backendCfg_.unregistration_thread_pool_size;
   }
 }

@@ -27,10 +27,9 @@ setup_report_build_error
 
 EXT_DATA_SOURCES_HDFS_PATH=${FILESYSTEM_PREFIX}/test-warehouse/data-sources
 JDBC_DRIVERS_HDFS_PATH=${EXT_DATA_SOURCES_HDFS_PATH}/jdbc-drivers
-SIMBA_DRIVER_ZIP_FILENAME=ClouderaImpala_JDBC${IMPALA_SIMBA_JDBC_DRIVER_VERSION}
-INNER_SIMBA_DRIVER_ZIP_FILENAME=ClouderaImpalaJDBC${IMPALA_SIMBA_JDBC_DRIVER_VERSION}
-DRIVER_JAR_VERSION=${IMPALA_SIMBA_JDBC_DRIVER_VERSION%-*}
-SIMBA_DRIVER_JAR_FILENAME=ImpalaJDBC${DRIVER_JAR_VERSION}.jar
+SIMBA_DRIVER_ZIP_FILENAME=ClouderaImpalaJDBC-${IMPALA_SIMBA_JDBC_DRIVER_VERSION}
+INNER_SIMBA_DRIVER_ZIP_FILENAME=ClouderaImpalaJDBC42-${IMPALA_SIMBA_JDBC_DRIVER_VERSION}
+SIMBA_DRIVER_JAR_FILENAME=ImpalaJDBC42.jar
 
 found=$(hadoop fs -find ${JDBC_DRIVERS_HDFS_PATH} -name ${SIMBA_DRIVER_JAR_FILENAME})
 if [ ! -z "$found" ]; then
@@ -45,7 +44,7 @@ mkdir -p impala_jdbc_driver
 cd impala_jdbc_driver
 
 # Download Impala jdbc driver.
-wget "https://downloads.cloudera.com/connectors/${SIMBA_DRIVER_ZIP_FILENAME}.zip"
+wget -nv "https://downloads.cloudera.com/connectors/${SIMBA_DRIVER_ZIP_FILENAME}.zip"
 
 # Use Python modules to unzip zip file since 'unzip' command is not available in some
 # testing environments.
@@ -57,8 +56,8 @@ pzf.extractall()
 __EOT__
 
 # Extract driver jar file from zip file.
-python ./unzip.py ${SIMBA_DRIVER_ZIP_FILENAME}.zip
-python ./unzip.py ${SIMBA_DRIVER_ZIP_FILENAME}/${INNER_SIMBA_DRIVER_ZIP_FILENAME}.zip
+python3 ./unzip.py ${SIMBA_DRIVER_ZIP_FILENAME}.zip
+python3 ./unzip.py ${SIMBA_DRIVER_ZIP_FILENAME}/${INNER_SIMBA_DRIVER_ZIP_FILENAME}.zip
 
 # Copy driver jar file to Hadoop FS.
 hadoop fs -put -f /tmp/impala_jdbc_driver/${SIMBA_DRIVER_JAR_FILENAME} \

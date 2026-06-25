@@ -30,11 +30,12 @@
 
 #include "catalog/catalog-service-client-wrapper.h"
 #include "common/status.h"
+#include "common/status-serialization.h"
 #include "exprs/timezone_db.h"
 #include "gen-cpp/Types_types.h"
 #include "kudu/rpc/rpc_controller.h"
 #include "observe/otel.h"
-#include "observe/span-manager.h"
+#include "observe/otel-trace-manager.h"
 #include "rpc/rpc-mgr.inline.h"
 #include "runtime/coordinator.h"
 #include "runtime/exec-env.h"
@@ -125,12 +126,12 @@ ClientRequestState::ClientRequestState(const TQueryCtx& query_ctx, Frontend* fro
     fetch_rows_timeout_us_(MICROS_PER_MILLI * query_options().fetch_rows_timeout_ms),
     parent_driver_(query_driver) {
 
-  if (FLAGS_otel_trace_enabled && should_otel_trace_query(sql_stmt(),
-    query_ctx.session.session_type)) {
+  if (FLAGS_otel_trace_enabled && should_otel_trace_query(
+      query_ctx_.session.session_type, query_ctx_.client_request)) {
     // initialize OpenTelemetry for this query
-    VLOG(2) << "Initializing OpenTelemetry for query " << PrintId(query_id());
-    otel_span_manager_ = build_span_manager(this);
-    otel_span_manager_->StartChildSpanInit();
+    VLOG(2) << "Initializing OpenTelemetry trace for query " << PrintId(query_id());
+    otel_trace_manager_ = build_otel_trace_manager(this);
+    otel_trace_manager_->StartChildSpanInit();
   }
 
   bool is_external_fe = session_type() == TSessionType::EXTERNAL_FRONTEND;
@@ -323,7 +324,7 @@ Status ClientRequestState::Exec() {
     case TStmtType::DDL: {
       DCHECK(exec_req.__isset.catalog_op_request);
       if (otel_trace_query()) {
-        otel_span_manager_->StartChildSpanQueryExecution();
+        otel_trace_manager_->StartChildSpanQueryExecution();
       }
       LOG_AND_RETURN_IF_ERROR(ExecDdlRequest());
       break;
@@ -521,6 +522,13 @@ Status ClientRequestState::ExecLocalCatalogOp(
       SetResultSet(result.role_names);
       return Status::OK();
     }
+    case TCatalogOpType::SHOW_CURRENT_GROUPS: {
+      const TShowCurrentGroupsParams& params = catalog_op.show_current_groups_params;
+      TShowCurrentGroupsResult result;
+      RETURN_IF_ERROR(frontend_->ShowCurrentGroups(params, &result));
+      SetResultSet(result.group_names);
+      return Status::OK();
+    }
     case TCatalogOpType::SHOW_GRANT_PRINCIPAL: {
       const TShowGrantPrincipalParams& params = catalog_op.show_grant_principal_params;
       TResultSet response;
@@ -674,7 +682,7 @@ void ClientRequestState::FinishExecQueryOrDmlRequest() {
   TUniqueIdToUniqueIdPB(query_id(), &query_id_pb);
 
   if (otel_trace_query() && !IsCTAS()) {
-    otel_span_manager_->StartChildSpanAdmissionControl();
+    otel_trace_manager_->StartChildSpanAdmissionControl();
   }
 
   TQueryExecRequest req;
@@ -713,16 +721,21 @@ void ClientRequestState::FinishExecQueryOrDmlRequest() {
       {query_id_pb, ExecEnv::GetInstance()->backend_id(), *admission_exec_request_,
           summary_profile_, blacklisted_executor_addresses_},
       query_events_, &schedule_, &wait_start_time_ms_, &wait_end_time_ms_,
-      otel_span_manager_.get());
+      otel_trace_manager_.get());
 
   if (otel_trace_query() && !IsCTAS()) {
-    otel_span_manager_->EndChildSpanAdmissionControl(admit_status);
-    otel_span_manager_->StartChildSpanQueryExecution();
+    otel_trace_manager_->EndChildSpanAdmissionControl(admit_status);
   }
 
   {
     lock_guard<mutex> l(lock_);
     if (!UpdateQueryStatus(admit_status).ok()) return;
+  }
+
+  // Don't start the query execution span for the insert portion of a CTAS query since it
+  // was already started during the select portion.
+  if (otel_trace_query() && !IsCTAS()) {
+    otel_trace_manager_->StartChildSpanQueryExecution();
   }
 
   DCHECK(schedule_.get() != nullptr);
@@ -838,7 +851,7 @@ void ClientRequestState::ExecDdlRequestImpl(bool exec_in_worker_thread) {
   Status status = catalog_op_executor_->Exec(exec_req.catalog_op_request);
   query_events_->MarkEvent("CatalogDdlRequest finished");
   if (otel_trace_query()) {
-    otel_span_manager_->AddChildSpanEvent("UpdateCatalogFinished");
+    otel_trace_manager_->AddChildSpanEvent("UpdateCatalogFinished");
   }
   AddCatalogTimeline();
   {
@@ -1170,7 +1183,7 @@ Status ClientRequestState::ExecShutdownRequest() {
     }
     return Status(err_string);
   }
-  Status shutdown_status(resp.status());
+  Status shutdown_status = StatusFromProto(resp.status());
   RETURN_IF_ERROR(shutdown_status);
   SetResultSet({ImpalaServer::ShutdownStatusToString(resp.shutdown_status())});
   return Status::OK();
@@ -1198,12 +1211,12 @@ void ClientRequestState::Finalize(const Status* cause) {
   if (otel_trace_query()) {
     // In a non-error case, end the query execution span since it will be the active span.
     if (cause == nullptr || cause->ok()) {
-      otel_span_manager_->EndChildSpanQueryExecution();
+      otel_trace_manager_->EndChildSpanQueryExecution();
     }
 
     // No need to end previous child span in an error case. This function silently closes
     // the active child span if there is one.
-    otel_span_manager_->StartChildSpanClose(cause);
+    otel_trace_manager_->StartChildSpanClose(cause);
   }
 
   Cancel(cause, /*wait_until_finalized=*/true);
@@ -1261,11 +1274,11 @@ void ClientRequestState::Finalize(const Status* cause) {
   query_events_->MarkEvent("Unregister query");
   UnRegisterRemainingRPCs();
   if (otel_trace_query()) {
-   otel_span_manager_->AddChildSpanEvent("QueryUnregistered");
-   otel_span_manager_->EndChildSpanClose();
+   otel_trace_manager_->AddChildSpanEvent("QueryUnregistered");
+   otel_trace_manager_->EndChildSpanClose();
 
    // End the root span and thus the entire trace is also ended.
-   otel_span_manager_.reset();
+   otel_trace_manager_.reset();
   }
 }
 
@@ -1324,7 +1337,7 @@ void ClientRequestState::Wait() {
     if (returns_result_set()) {
       query_events()->MarkEvent("Rows available");
       if (LIKELY(status.code() != TErrorCode::CANCELLED) && otel_trace_query()) {
-        otel_span_manager_->AddChildSpanEvent("RowsAvailable");
+        otel_trace_manager_->AddChildSpanEvent("RowsAvailable");
       }
     } else {
       query_events()->MarkEvent("Request finished");
@@ -1767,7 +1780,7 @@ Status ClientRequestState::UpdateCatalog() {
           summary_profile_->AddEventSequence(timeline_name, catalog_timeline);
         }
       }
-      if (status.ok()) status = Status(resp.result.status);
+      if (status.ok()) status = StatusFromThrift(resp.result.status);
       if (!status.ok()) {
         if (InTransaction()) AbortTransaction();
         LOG(ERROR) << "ERROR Finalizing DML: " << status.GetDetail();
@@ -1799,69 +1812,87 @@ Status ClientRequestState::UpdateCatalog() {
   }
   query_events_->MarkEvent("DML Metastore update finished");
   if (otel_trace_query()) {
-     otel_span_manager_->AddChildSpanEvent("MetastoreUpdateFinished");
+     otel_trace_manager_->AddChildSpanEvent("MetastoreUpdateFinished");
   }
   return Status::OK();
+}
+
+bool ClientRequestState::SetDeleteArtifacts(
+    DmlExecState* dml_exec_state, TIcebergOperationParam* cat_ice_op) {
+  auto added_dvs = dml_exec_state->CreateIcebergAddedDeletionVectors();
+  auto removed_dvs = dml_exec_state->CreateIcebergRemovedDeletionVectors();
+  cat_ice_op->__set_data_files_referenced_by_position_deletes(
+      dml_exec_state->DataFilesReferencedByPositionDeletes());
+  if (!added_dvs.empty() || !removed_dvs.empty()) {
+    // DV operation: set only the DV lists; delete files are not used.
+    cat_ice_op->iceberg_added_deletion_vectors_fb = std::move(added_dvs);
+    cat_ice_op->__isset.iceberg_added_deletion_vectors_fb = true;
+    cat_ice_op->iceberg_removed_deletion_vectors_fb = std::move(removed_dvs);
+    cat_ice_op->__isset.iceberg_removed_deletion_vectors_fb = true;
+    return true;
+  }
+  cat_ice_op->iceberg_delete_files_fb =
+      dml_exec_state->CreateIcebergDeleteFilesVector();
+  cat_ice_op->__isset.iceberg_delete_files_fb = true;
+
+  return !cat_ice_op->iceberg_delete_files_fb.empty();
 }
 
 bool ClientRequestState::CreateIcebergCatalogOps(
     const TFinalizeParams& finalize_params, TIcebergOperationParam* cat_ice_op) {
   DCHECK(cat_ice_op != nullptr);
-  const TIcebergDmlFinalizeParams& ice_finalize_params = finalize_params.iceberg_params;
-  DmlExecState* dml_exec_state = GetCoordinator()->dml_exec_state();
-  bool update_catalog = true;
-  cat_ice_op->__set_operation(ice_finalize_params.operation);
-  cat_ice_op->__set_initial_snapshot_id(
-      ice_finalize_params.initial_snapshot_id);
-  cat_ice_op->__set_spec_id(ice_finalize_params.spec_id);
-  if (ice_finalize_params.operation == TIcebergOperation::INSERT) {
-    cat_ice_op->__set_iceberg_data_files_fb(
-        dml_exec_state->CreateIcebergDataFilesVector());
-    cat_ice_op->__set_is_overwrite(finalize_params.is_overwrite);
-    if (cat_ice_op->iceberg_data_files_fb.empty()) update_catalog = false;
-  } else if (ice_finalize_params.operation == TIcebergOperation::DELETE) {
-    cat_ice_op->__set_iceberg_delete_files_fb(
-        dml_exec_state->CreateIcebergDeleteFilesVector());
-    cat_ice_op->__set_data_files_referenced_by_position_deletes(
-        dml_exec_state->DataFilesReferencedByPositionDeletes());
-    if (cat_ice_op->iceberg_delete_files_fb.empty()) update_catalog = false;
-  } else if (ice_finalize_params.operation == TIcebergOperation::UPDATE) {
-    cat_ice_op->__set_iceberg_data_files_fb(
-        dml_exec_state->CreateIcebergDataFilesVector());
-    cat_ice_op->__set_iceberg_delete_files_fb(
-        dml_exec_state->CreateIcebergDeleteFilesVector());
-    cat_ice_op->__set_data_files_referenced_by_position_deletes(
-        dml_exec_state->DataFilesReferencedByPositionDeletes());
-    if (cat_ice_op->iceberg_delete_files_fb.empty()) {
-      DCHECK(cat_ice_op->iceberg_data_files_fb.empty());
-      update_catalog = false;
-    }
-  } else if (ice_finalize_params.operation == TIcebergOperation::OPTIMIZE) {
-    DCHECK(ice_finalize_params.__isset.optimize_params);
-    const TIcebergOptimizeParams& optimize_params = ice_finalize_params.optimize_params;
-    if (optimize_params.mode == TIcebergOptimizationMode::NOOP) {
-      update_catalog = false;
-    } else {
-      cat_ice_op->__set_iceberg_data_files_fb(
-          dml_exec_state->CreateIcebergDataFilesVector());
-      if (optimize_params.mode == TIcebergOptimizationMode::PARTIAL) {
-        DCHECK(optimize_params.__isset.selected_data_files_without_deletes);
+  const TIcebergDmlFinalizeParams& ice_params = finalize_params.iceberg_params;
+  DmlExecState* dml = GetCoordinator()->dml_exec_state();
+
+  cat_ice_op->__set_operation(ice_params.operation);
+  cat_ice_op->__set_initial_snapshot_id(ice_params.initial_snapshot_id);
+  cat_ice_op->__set_spec_id(ice_params.spec_id);
+
+  bool has_data_files = false;
+  bool has_delete_artifacts = false;
+
+  switch (ice_params.operation) {
+    case TIcebergOperation::INSERT:
+      cat_ice_op->__set_iceberg_data_files_fb(dml->CreateIcebergDataFilesVector());
+      cat_ice_op->__set_is_overwrite(finalize_params.is_overwrite);
+      has_data_files = !cat_ice_op->iceberg_data_files_fb.empty();
+      break;
+
+    case TIcebergOperation::DELETE:
+      has_delete_artifacts = SetDeleteArtifacts(dml, cat_ice_op);
+      break;
+
+    case TIcebergOperation::UPDATE:
+      cat_ice_op->__set_iceberg_data_files_fb(dml->CreateIcebergDataFilesVector());
+      has_data_files = !cat_ice_op->iceberg_data_files_fb.empty();
+      has_delete_artifacts = SetDeleteArtifacts(dml, cat_ice_op);
+      // UPDATE rewrites rows as delete+insert pairs: delete artifacts must be present
+      // whenever data files are.
+      DCHECK(has_delete_artifacts || !has_data_files);
+      break;
+
+    case TIcebergOperation::MERGE:
+      cat_ice_op->__set_iceberg_data_files_fb(dml->CreateIcebergDataFilesVector());
+      has_data_files = !cat_ice_op->iceberg_data_files_fb.empty();
+      has_delete_artifacts = SetDeleteArtifacts(dml, cat_ice_op);
+      break;
+
+    case TIcebergOperation::OPTIMIZE: {
+      DCHECK(ice_params.__isset.optimize_params);
+      const TIcebergOptimizeParams& opt = ice_params.optimize_params;
+      if (opt.mode == TIcebergOptimizationMode::NOOP) break;
+      cat_ice_op->__set_iceberg_data_files_fb(dml->CreateIcebergDataFilesVector());
+      if (opt.mode == TIcebergOptimizationMode::PARTIAL) {
+        DCHECK(opt.__isset.selected_data_files_without_deletes);
         cat_ice_op->__set_replaced_data_files_without_deletes(
-            optimize_params.selected_data_files_without_deletes);
+            opt.selected_data_files_without_deletes);
       }
-    }
-  } else if (ice_finalize_params.operation == TIcebergOperation::MERGE) {
-    cat_ice_op->__set_iceberg_data_files_fb(
-        dml_exec_state->CreateIcebergDataFilesVector());
-    cat_ice_op->__set_iceberg_delete_files_fb(
-        dml_exec_state->CreateIcebergDeleteFilesVector());
-    cat_ice_op->__set_data_files_referenced_by_position_deletes(
-        dml_exec_state->DataFilesReferencedByPositionDeletes());
-    if (cat_ice_op->iceberg_delete_files_fb.empty()
-        && cat_ice_op->iceberg_data_files_fb.empty()) {
-      update_catalog = false;
+      has_data_files = true;
+      break;
     }
   }
+
+  bool update_catalog = has_data_files || has_delete_artifacts;
   if (!update_catalog) query_events_->MarkEvent("No-op Iceberg DML statement");
   return update_catalog;
 }
@@ -2017,6 +2048,7 @@ Status ClientRequestState::UpdateTableAndColumnStats(
   }
 
   const TExecRequest& exec_req = exec_request();
+
   std::optional<long> snapshot_id = getIcebergSnapshotId(exec_req);
   Status status = catalog_op_executor_->ExecComputeStats(
       GetCatalogServiceRequestHeader(),
@@ -2679,7 +2711,7 @@ Status ClientRequestState::TryKillQueryRemotely(
     }
     // Currently, we only support killing one query in one KILL QUERY statement.
     DCHECK_EQ(response.statuses_size(), 1);
-    status = Status(response.statuses(0));
+    status = StatusFromProto(response.statuses(0));
     if (status.ok()) {
       // Kill succeeded.
       VLOG_QUERY << "KillQuery: Found the coordinator at "

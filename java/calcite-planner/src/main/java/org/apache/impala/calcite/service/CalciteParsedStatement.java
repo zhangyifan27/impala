@@ -19,14 +19,15 @@ package org.apache.impala.calcite.service;
 
 import java.util.Set;
 
+import org.apache.calcite.sql.SqlBasicCall;
 import org.apache.calcite.sql.SqlExplain;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.impala.analysis.AnalysisContext;
-import org.apache.impala.analysis.AnalysisDriver;
 import org.apache.impala.analysis.ParsedStatement;
 import org.apache.impala.analysis.TableName;
 import org.apache.impala.analysis.StmtMetadataLoader;
-import org.apache.impala.catalog.FeCatalog;
+import org.apache.impala.analysis.ColumnLineageGraph.OperationType;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.thrift.TQueryCtx;
 
@@ -79,6 +80,51 @@ public class CalciteParsedStatement implements ParsedStatement {
   }
 
   @Override
+  public boolean isAlterTableStmt() { return false; }
+
+  @Override
+  public boolean isComputeStatsStmt() { return false; }
+
+  @Override
+  public boolean isCreateDbStmt() { return false; }
+
+  @Override
+  public boolean isCreateTableAsSelectStmt() { return false; }
+
+  @Override
+  public boolean isCreateTableLikeStmt() { return false; }
+
+  @Override
+  public boolean isCreateTableStmt() { return false; }
+
+  @Override
+  public boolean isCreateViewStmt() { return false; }
+
+  @Override
+  public boolean isDeleteStmt() { return false; }
+
+  @Override
+  public boolean isDropDbStmt() { return false; }
+
+  @Override
+  public boolean isDropTableOrViewStmt() { return false; }
+
+  @Override
+  public boolean isInsertStmt() { return false; }
+
+  @Override
+  public boolean isInvalidateMetadata() { return false; }
+
+  @Override
+  public boolean isUpdateStmt() {return false; }
+
+  @Override
+  public boolean isValuesStmt() {
+    return parsedNode_ instanceof SqlBasicCall
+        && ((SqlBasicCall) parsedNode_).getOperator().getKind() == SqlKind.VALUES;
+  }
+
+  @Override
   public String toSql() {
     return sql_;
   }
@@ -87,6 +133,12 @@ public class CalciteParsedStatement implements ParsedStatement {
   public void handleAuthorizationException(
       AnalysisContext.AnalysisResult analysisResult) {
     // Do nothing.
+  }
+
+  @Override
+  public OperationType getOperationType() {
+    // Currently, we only support SELECT queries when Calcite is the planner.
+    return OperationType.SELECT;
   }
 
   public SqlNode getParsedSqlNode() {

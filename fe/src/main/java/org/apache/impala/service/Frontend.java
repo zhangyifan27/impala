@@ -25,6 +25,7 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
@@ -98,6 +99,7 @@ import org.apache.impala.analysis.ParsedStatement;
 import org.apache.impala.analysis.Parser;
 import org.apache.impala.analysis.QueryStmt;
 import org.apache.impala.analysis.ResetMetadataStmt;
+import org.apache.impala.analysis.ShowCurrentGroupsStmt;
 import org.apache.impala.analysis.ShowDbsStmt;
 import org.apache.impala.analysis.ShowFunctionsStmt;
 import org.apache.impala.analysis.ShowGrantPrincipalStmt;
@@ -221,6 +223,7 @@ import org.apache.impala.thrift.TLoadDataResp;
 import org.apache.impala.thrift.TMetadataOpRequest;
 import org.apache.impala.thrift.TPlanExecInfo;
 import org.apache.impala.thrift.TPlanFragment;
+import org.apache.impala.thrift.TPlannerType;
 import org.apache.impala.thrift.TPoolConfig;
 import org.apache.impala.thrift.TQueryCtx;
 import org.apache.impala.thrift.TQueryExecRequest;
@@ -260,6 +263,7 @@ import org.apache.kudu.client.KuduClient;
 import org.apache.kudu.client.KuduException;
 import org.apache.kudu.client.KuduTransaction;
 import org.apache.thrift.TException;
+import org.apache.thrift.TSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -301,12 +305,19 @@ public class Frontend {
   private static final String CPU_ASK_BOUNDED = "CpuAskBounded";
   private static final String AVG_ADMISSION_SLOTS_PER_EXECUTOR =
       "AvgAdmissionSlotsPerExecutor";
-  private static final String CALCITE_FAILURE_REASON = "CalciteFailureReason";
+  private static final String FIRST_ATTEMPT_PLANNER = "FirstAttemptPlanner";
+  private static final String FIRST_ATTEMPT_FAILURE_REASON = "FirstAttemptFailureReason";
 
   // info about the planner used. In this code, we will always use the Original planner,
   // but other planners may set their own planner values
   public static final String PLANNER_PROFILE = "PlannerInfo";
   public static final String PLANNER_TYPE = "PlannerType";
+
+  // The Calcite compiler is loaded on demand, not linked in. The factory is a
+  // singleton.
+  private static CompilerFactory CALCITE_COMPILER_FACTORY = loadCalciteCompilerFactory();
+
+  private static CompilerFactory ORIGINAL_COMPILER_FACTORY = new CompilerFactoryImpl();
 
   /**
    * Plan-time context that allows capturing various artifacts created
@@ -327,6 +338,12 @@ public class Frontend {
     // incomplete structures (e.g. THdfsTable without nullPartitionKeyValue) that cannot
     // be serialized.
     protected boolean serializeDescTbl_ = true;
+    // Flag to indicate if the backend has been notified whether or not to create an
+    // OpenTelemetry trace for this query. This variable has three valid states:
+    // null (not yet notified)
+    // true (notified to create a trace),
+    // false (notified to not create a trace).
+    protected Boolean queryTraced_ = null;
 
     // The physical plan, divided by fragment, before conversion to
     // Thrift. For unit testing.
@@ -869,6 +886,12 @@ public class Frontend {
       ddl.setShow_roles_params(showRolesStmt.toThrift());
       metadata.setColumns(Arrays.asList(
           new TColumn("role_name", Type.STRING.toThrift())));
+    } else if (analysis.isShowCurrentGroupsStmt()) {
+      ddl.op_type = TCatalogOpType.SHOW_CURRENT_GROUPS;
+      ShowCurrentGroupsStmt stmt = (ShowCurrentGroupsStmt) analysis.getStmt();
+      ddl.setShow_current_groups_params(stmt.toThrift());
+      metadata.setColumns(
+          Arrays.asList(new TColumn("group_name", Type.STRING.toThrift())));
     } else if (analysis.isShowGrantPrincipalStmt()) {
       ddl.op_type = TCatalogOpType.SHOW_GRANT_PRINCIPAL;
       ShowGrantPrincipalStmt showGrantPrincipalStmt =
@@ -1735,13 +1758,14 @@ public class Frontend {
    * Generate result set and schema for a SHOW TABLE STATS command.
    */
   public TResultSet getTableStats(String dbName, String tableName, TShowStatsOp op,
-      List<Long> filteredPartitionIds)
+      List<Long> filteredPartitionIds, @Nullable TResultSet filteredIcebergPartitionStats)
       throws ImpalaException {
     RetryTracker retries = new RetryTracker(
         String.format("fetching table stats from %s.%s", dbName, tableName));
     while (true) {
       try {
-        return doGetTableStats(dbName, tableName, op, filteredPartitionIds);
+        return doGetTableStats(dbName, tableName, op, filteredPartitionIds,
+            filteredIcebergPartitionStats);
       } catch(InconsistentMetadataFetchException e) {
         retries.handleRetryOrThrow(e);
       }
@@ -1749,11 +1773,18 @@ public class Frontend {
   }
 
   private TResultSet doGetTableStats(String dbName, String tableName, TShowStatsOp op,
-      List<Long> filteredPartitionIds)
+      List<Long> filteredPartitionIds, @Nullable TResultSet filteredIcebergPartitionStats)
       throws ImpalaException {
     FeTable table = getCatalog().getTable(dbName, tableName);
     if (table instanceof FeFsTable) {
       if (table instanceof FeIcebergTable && op == TShowStatsOp.PARTITIONS) {
+        // For Iceberg tables with WHERE clause, use the pre-computed filtered stats.
+        // Following the IMPALA-12243 pattern, we compute results during analysis
+        // and serialize the results rather than the expression.
+        if (filteredIcebergPartitionStats != null) {
+          return filteredIcebergPartitionStats;
+        }
+        // No filter - return all partitions
         return FeIcebergTable.Utils.getPartitionStats((FeIcebergTable) table);
       }
       if (table instanceof FeIcebergTable && op == TShowStatsOp.TABLE_STATS) {
@@ -2030,7 +2061,8 @@ public class Frontend {
 
     // The fragment at this point has all state set, serialize it to thrift.
     for (PlanFragment fragment: fragments) {
-      TPlanFragment thriftFragment = fragment.toThrift();
+      TPlanFragment thriftFragment =
+          fragment.toThrift(queryCtx.client_request.query_options);
       result.addToFragments(thriftFragment);
     }
 
@@ -2115,6 +2147,13 @@ public class Frontend {
       result.setProfile(FrontendProfile.getCurrent().emitAsThrift());
       result.setProfile_children(FrontendProfile.getCurrent().emitChildrenAsThrift());
       return result;
+    } finally {
+      // In normal processing, the Otel tracing gets updated immediately after the
+      // parsing statement. In cases where it fails because of parsing, it gets set
+      // here.
+      if (BackendConfig.INSTANCE.isOtelTraceEnabled()) {
+        updateQueryOtelTracing(planCtx.queryCtx_.getQuery_id(), planCtx, null);
+      }
     }
   }
 
@@ -2399,46 +2438,63 @@ public class Frontend {
 
   private TExecRequest getTExecRequestWithFallback(
       PlanCtx planCtx, EventSequence timeline) throws ImpalaException {
-    TExecRequest request = null;
-    CompilerFactory compilerFactory = getCalciteCompilerFactory(planCtx);
-    String exceptionClass = null;
-    if (compilerFactory != null) {
+    TQueryOptions queryOptions =
+        planCtx.getQueryContext().client_request.getQuery_options();
+    TPlannerType planner = queryOptions.getPlanner();
+    TPlannerType fallbackPlanner = queryOptions.getFallback_planner();
+    List<TPlannerType> plannerTypes =
+        (planner == fallbackPlanner || fallbackPlanner == TPlannerType.NONE)
+            ? ImmutableList.of(planner)
+            : ImmutableList.of(planner, fallbackPlanner);
+
+    LOG.info("Searching for planner to use...");
+    boolean onlyCalcite = (plannerTypes.size() == 1 && planner == TPlannerType.CALCITE);
+    Throwable error = null;
+    CompilerFactory compilerFactory;
+    String attemptedPlanner = null;
+    for (TPlannerType plannerType : plannerTypes) {
+      compilerFactory = getCompilerFactory(plannerType);
       try {
-        request = getTExecRequest(compilerFactory, planCtx, timeline);
-      } catch (Exception e) {
-        if (!shouldFallbackToRegularPlanner(planCtx, e)) {
-          throw e;
-        }
-        LOG.info("Calcite planner failed: {}", e.getClass());
-        exceptionClass = e.getClass().toString();
-        timeline.markEvent("Failing over from Calcite planner");
+        TExecRequest request = getTExecRequest(compilerFactory, planCtx, timeline);
+        addPlannerToProfile(compilerFactory.getPlannerString(), attemptedPlanner, error);
+        return request;
+      } catch (Throwable e) {
+        // If there is any kind of exception from the first planner, we hit this code.
+        error = e;
+        attemptedPlanner = compilerFactory.getPlannerString();
+        LOG.info(attemptedPlanner + " planner failed: {}", e.getClass());
       }
     }
-    if (request == null) {
-      LOG.info("Using Original Planner.");
-      // use the original planner if Calcite planner is not set or fallback
-      // for Calcite planner is enabled.
-      compilerFactory = new CompilerFactoryImpl();
-      request = getTExecRequest(compilerFactory, planCtx, timeline);
+
+    // None of the planners worked. Exceptional case: If only Calcite, fallback for
+    // unsupported SQLs
+    if (error != null && onlyCalcite && isUnsupportedCalciteSQL(planCtx, error)) {
+      compilerFactory = getCompilerFactory(TPlannerType.ORIGINAL);
+      TExecRequest request = getTExecRequest(compilerFactory, planCtx, timeline);
+      addPlannerToProfile(compilerFactory.getPlannerString(), attemptedPlanner, error);
+      return request;
     }
-    addPlannerToProfile(compilerFactory.getPlannerString(), exceptionClass);
-    return request;
+
+    if (error instanceof ImpalaException) {
+      throw (ImpalaException) error;
+    }
+    throw new RuntimeException(error);
   }
 
-  private boolean shouldFallbackToRegularPlanner(PlanCtx planCtx, Exception e) {
-    // TODO: Need a fallback flag for various modes. In production, we will most
-    // likely want to fallback to the original planner, but in testing, we might want
-    // the query to fail.
-    // There are some cases where we will always want to fallback, e.g. if the statement
-    // fails at parse time because it is not a select statement.
-    if (e instanceof UnsupportedFeatureException) {
-      return true;
-    }
+  private boolean isUnsupportedCalciteSQL(PlanCtx planCtx, Throwable e) {
     TQueryCtx queryCtx = planCtx.getQueryContext();
     try {
-      return !(Parser.parse(queryCtx.client_request.stmt,
-          queryCtx.client_request.query_options) instanceof QueryStmt);
+      // return true either if
+      // a) The UnsupportedFeatureException was explicitly thrown by the Calcite planner
+      // b) The SQL is parseable by the original planner and it's something other than
+      //    a query statememnt (e.g. DDL) which should always be run on the orignal
+      //    planner. The "Parser.parse()" method is the original planner parser.
+      return (e instanceof UnsupportedFeatureException) ||
+          !(Parser.parse(queryCtx.client_request.stmt,
+              queryCtx.client_request.query_options) instanceof QueryStmt);
     } catch (Exception f) {
+      // If an exception was thrown, it failed to parse in the original planner, so there
+      // is no reason to compile it there.
       return false;
     }
   }
@@ -2848,13 +2904,17 @@ public class Frontend {
     }
   }
 
-  public static void addPlannerToProfile(String planner, String exceptionClass) {
+  public static void addPlannerToProfile(String planner, String firstAttemptPlanner,
+      Throwable firstAttemptException) {
     TRuntimeProfileNode profile = createTRuntimeProfileNode(PLANNER_PROFILE);
     addInfoString(profile, PLANNER_TYPE, planner);
-    if (exceptionClass != null) {
-      addInfoString(profile, CALCITE_FAILURE_REASON, exceptionClass);
+    if (firstAttemptPlanner != null) {
+      addInfoString(profile, FIRST_ATTEMPT_PLANNER, firstAttemptPlanner);
+      addInfoString(profile, FIRST_ATTEMPT_FAILURE_REASON,
+          firstAttemptException.getClass().toString());
     }
     FrontendProfile.getCurrent().addChildrenProfile(profile);
+
   }
 
   /**
@@ -2944,6 +3004,9 @@ public class Frontend {
 
     String positionalDeleteFiles = Long.toString(metrics.positionalDeleteFiles().value());
     addInfoString(profile, ScanMetrics.POSITIONAL_DELETE_FILES, positionalDeleteFiles);
+
+    String deleteVectors = Long.toString(metrics.dvs().value());
+    addInfoString(profile, ScanMetrics.DVS, deleteVectors);
   }
 
   private TExecRequest doCreateExecRequest(CompilerFactory compilerFactory,
@@ -2951,8 +3014,10 @@ public class Frontend {
       throws ImpalaException {
     TQueryCtx queryCtx = planCtx.getQueryContext();
 
-    // Parse stmt and collect/load metadata to populate a stmt-local table cache
-    ParsedStatement parsedStmt = compilerFactory.createParsedStatement(queryCtx);
+    // Determine if an OpenTelemetry trace should be created for this query, and if so,
+    // create the trace.
+    ParsedStatement parsedStmt =
+        parseAndDoOtelTracing(compilerFactory, queryCtx, planCtx);
 
     User user = new User(TSessionStateUtil.getEffectiveUser(queryCtx.session));
     StmtMetadataLoader metadataLoader = new StmtMetadataLoader(
@@ -3237,6 +3302,98 @@ public class Frontend {
         }
       }
       throw e;
+    }
+  }
+
+  /**
+   * Parses the query text and determines if an OpenTelemetry trace should be created for
+   * the query. If a trace should be created, this function notifies the backend to
+   * start the trace.
+   *
+   * @param compilerFactory {@link CompilerFactory} to use for parsing the statement
+   * @param queryCtx        {@link TQueryCtx} of the statement to check
+   * @param planCtx         {@link PlanCtx} of the statement to check
+   *
+   * @return the {@link ParsedStatement} returned from the sql parser
+   * @throws {@link ImpalaException} if {@link CompilerFactory#createParsedStatement}
+   *                                 throws an exception.
+   */
+  private ParsedStatement parseAndDoOtelTracing(final CompilerFactory compilerFactory,
+      final TQueryCtx queryCtx, final PlanCtx planCtx) throws ImpalaException {
+    ParsedStatement parsedStmt;
+
+    // Parse stmt and collect/load metadata to populate a stmt-local table cache
+    parsedStmt = compilerFactory.createParsedStatement(queryCtx);
+
+    // Determine whether to enable OpenTelemetry tracing for the query.
+    if (planCtx.queryTraced_ == null) {
+      if (!BackendConfig.INSTANCE.isOtelTraceEnabled()) {
+        planCtx.queryTraced_ = Boolean.FALSE;
+      } else {
+        updateQueryOtelTracing(queryCtx.getQuery_id(), planCtx, parsedStmt);
+      }
+    }
+
+    return parsedStmt;
+  }
+
+  /**
+   * Determines if a statement should have an OpenTelemetry trace created for it and
+   * notifies the backend of the decision. Sets <code>planCtx.queryTraced_</code> with the
+   * result of the decision if it has not already been set.
+   *
+   * No-op if <code>planCtx.queryTraced_</code> is already set which means the first call
+   * of this function wins (if it is called multiple times).
+   *
+   * @param queryId    {@link TUniqueId} of the statement to check
+   * @param planCtx    {@link PlanCtx} of the statement to check
+   * @param parsedStmt {@link ParsedStatement} of the statement to check, returned from
+   *                    the sql parser
+   * @throws AnalysisException see {@link Frontend#updateQueryOtelTracingInBE}
+   */
+  private void updateQueryOtelTracing(final TUniqueId queryId, final PlanCtx planCtx,
+      final ParsedStatement parsedStmt) throws AnalysisException {
+    if (planCtx.queryTraced_ == null) {
+      planCtx.queryTraced_ = parsedStmt != null && Boolean.valueOf(
+          !parsedStmt.isExplain()
+          && !parsedStmt.isValuesStmt()
+          && (
+              parsedStmt.isQueryStmt()
+              || parsedStmt.isAlterTableStmt()
+              || parsedStmt.isComputeStatsStmt()
+              || parsedStmt.isCreateDbStmt()
+              || parsedStmt.isCreateTableAsSelectStmt()
+              || parsedStmt.isCreateTableLikeStmt()
+              || parsedStmt.isCreateTableStmt()
+              || parsedStmt.isCreateViewStmt()
+              || parsedStmt.isDeleteStmt()
+              || parsedStmt.isDropDbStmt()
+              || parsedStmt.isDropTableOrViewStmt()
+              || parsedStmt.isInsertStmt()
+              || parsedStmt.isInvalidateMetadata()
+              || parsedStmt.isUpdateStmt()));
+
+      updateQueryOtelTracingInBE(queryId, planCtx.queryTraced_.booleanValue());
+    }
+  }
+
+  /**
+   * Wrapper around the native call to the backend to notify it of whether OpenTelemetry
+   * tracing should be enabled for a query.
+   *
+   * @param queryId {@link TUniqueId} of the statement to check
+   * @param shouldTrace {@code boolean} indicating if the query should be traced
+   * @throws AnalysisException if there is an error while serializing the
+   *                           <code>queryId</code>
+   */
+  private void updateQueryOtelTracingInBE(final TUniqueId queryId,
+      boolean shouldTrace) throws AnalysisException {
+    try {
+      FeSupport.NativeUpdateQueryOtelTracing(new TSerializer().serialize(queryId),
+          shouldTrace);
+    } catch (TException e) {
+      throw new AnalysisException("Failed to serialize query id '" +  PrintId(queryId)
+          + "' for OpenTelemetry tracing.", e);
     }
   }
 
@@ -3773,26 +3930,34 @@ public class Frontend {
     }
   }
 
-  @Nullable
-  private CompilerFactory getCalciteCompilerFactory(PlanCtx ctx) {
-    TQueryOptions queryOptions = ctx.getQueryContext().client_request.getQuery_options();
-    LOG.info("Searching for planner to use...");
-    if (queryOptions.isUse_calcite_planner()) {
-      try {
-        CompilerFactory calciteFactory = (CompilerFactory) Class.forName(
-            "org.apache.impala.calcite.service." +
-            "CalciteCompilerFactory").newInstance();
-        if (calciteFactory != null) {
-          LOG.info("Found Calcite Planner, using it.");
-          return calciteFactory;
-        } else {
-          LOG.info("Could not find Calcite planner, using original planner.");
+  private CompilerFactory getCompilerFactory(TPlannerType plannerType) {
+    switch (plannerType) {
+      case ORIGINAL:
+        LOG.info("Using Original Planner.");
+        return ORIGINAL_COMPILER_FACTORY;
+      case CALCITE:
+        if (CALCITE_COMPILER_FACTORY == null) {
+          LOG.info("Could not find Calcite planner.");
+          throw new RuntimeException("Could not find Calcite Planner");
         }
-      } catch (Exception e) {
-        LOG.info("Could not find Calcite planner, using original planner: " + e);
-      }
+        LOG.info("Using Calcite Planner.");
+        return CALCITE_COMPILER_FACTORY;
+      default:
+        throw new RuntimeException("Unknown planner type: [" + plannerType + "]");
     }
-    return null;
+  }
+
+  private static CompilerFactory loadCalciteCompilerFactory() {
+    LOG.info("Loading Calcite Planner jar file");
+    try {
+      System.setProperty("calcite.default.charset", "UTF8");
+      return (CompilerFactory) Class.forName(
+          "org.apache.impala.calcite.service." +
+          "CalciteCompilerFactory").newInstance();
+    } catch (Exception e) {
+      LOG.info("Could not find Calcite planner: " + e);
+      return null;
+    }
   }
 
   public String getShowCreateTable(

@@ -23,6 +23,7 @@
 #include "common/status.h"
 #include "gen-cpp/CatalogService_types.h"
 #include "gen-cpp/Frontend_types.h"
+#include "gen-cpp/HBO_types.h"
 #include "gen-cpp/ImpalaHiveServer2Service.h"
 #include "gen-cpp/ImpalaService.h"
 #include "gen-cpp/LineageGraph_types.h"
@@ -148,6 +149,10 @@ class Frontend {
   /// Call FE to get the roles.
   Status ShowRoles(const TShowRolesParams& params, TShowRolesResult* result);
 
+  /// Call FE to get the groups associated with the effective user.
+  Status ShowCurrentGroups(const TShowCurrentGroupsParams& params,
+      TShowCurrentGroupsResult* result);
+
   /// Returns (in the output parameter) the result of a DESCRIBE DATABASE db command.
   /// This command retrieves db metadata, such as db location and comment.
   /// The metadata that is returned is controlled by setting the 'output_style' field.
@@ -265,6 +270,8 @@ class Frontend {
   /// Returns a CSV list of Impala keywords excluding the provided ODBC-reserved CSV.
   Status GetNonOdbcKeywords(const std::string& odbc_keywords_csv, std::string* response);
 
+  Status StoreExecStats(const THistoricalStatsUpdate& stats);
+
  private:
   jclass fe_class_; // org.apache.impala.service.JniFrontend class
   jobject fe_;  // instance of org.apache.impala.service.JniFrontend
@@ -291,6 +298,7 @@ class Frontend {
   jmethodID get_catalog_object_id_; // JniFrontend.getCatalogObject
   jmethodID get_catalog_table_id_; // JniFrontend.getCatalogTable
   jmethodID show_roles_id_; // JniFrontend.getRoles
+  jmethodID show_current_groups_id_; // JniFrontend.showCurrentGroups
   jmethodID get_principal_privileges_id_; // JniFrontend.getPrincipalPrivileges
   jmethodID exec_hs2_metadata_op_id_; // JniFrontend.execHiveServer2MetadataOp
   jmethodID load_table_data_id_; // JniFrontend.loadTableData
@@ -313,6 +321,7 @@ class Frontend {
   jmethodID hive_legacy_timezone_convert_; // JniFrontend.hiveLegacyTimezoneConvert()
   jmethodID cancel_exec_request_id_; // JniFrontend.cancelExecRequest()
   jmethodID get_non_odbc_keywords_id_; // JniFrontend.getNonOdbcKeywords(String)
+  jmethodID store_exec_stats_; // JniFrontend.storeExecStats()
 
   // Only used for testing.
   jmethodID build_test_descriptor_table_id_; // JniFrontend.buildTestDescriptorTable()

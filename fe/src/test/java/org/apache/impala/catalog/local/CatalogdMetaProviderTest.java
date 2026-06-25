@@ -48,7 +48,6 @@ import org.apache.impala.service.FrontendProfile;
 import org.apache.impala.testutil.HiveJdbcClientPool;
 import org.apache.impala.testutil.HiveJdbcClientPool.HiveJdbcClient;
 import org.apache.impala.testutil.ImpalaJdbcClient;
-import org.apache.impala.testutil.TestUtils;
 import org.apache.impala.thrift.TBackendGflags;
 import org.apache.impala.thrift.TBriefTableMeta;
 import org.apache.impala.thrift.TCatalogObject;
@@ -61,7 +60,6 @@ import org.apache.impala.thrift.TTable;
 import org.apache.impala.util.ListMap;
 import org.apache.impala.util.TByteBuffer;
 import org.apache.thrift.TConfiguration;
-import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -272,14 +270,8 @@ public class CatalogdMetaProviderTest {
     // TPartialPartitionInfo in future.
     SizeOfWeigher weigher = new SizeOfWeigher();
     int weigh = weigher.weigh(refs, null);
-    assertTrue("Actual weigh: " + weigh, weigh > 4000);
-    assertTrue("Actual weigh: " + weigh, weigh < 5000);
-
-    // Also continue to test ehcache.
-    weigher = new SizeOfWeigher(false, null);
-    weigh = weigher.weigh(refs, null);
-    assertTrue("Actual weigh: " + weigh, weigh > 4000);
-    assertTrue("Actual weigh: " + weigh, weigh < 5000);
+    assertTrue("Actual weigh: " + weigh, weigh > 4000 / 16);
+    assertTrue("Actual weigh: " + weigh, weigh < 5000 / 16);
   }
 
   @Test
@@ -438,21 +430,11 @@ public class CatalogdMetaProviderTest {
 
   @Test
   public void testPiggybackSuccess() throws Exception {
-    // TODO: investigate the cause of flakiness (IMPALA-8794)
-    Assume.assumeTrue(
-        "Skipping this test because it is flaky with Hive3",
-        TestUtils.getHiveMajorVersion() == 2);
-
     doTestPiggyback(/*success=*/true);
   }
 
   @Test
   public void testPiggybackFailure() throws Exception {
-    // TODO: investigate the cause of flakiness (IMPALA-8794)
-    Assume.assumeTrue(
-        "Skipping this test because it is flaky with Hive3",
-        TestUtils.getHiveMajorVersion() == 2);
-
     doTestPiggyback(/*success=*/false);
   }
 

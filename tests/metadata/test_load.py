@@ -17,8 +17,6 @@
 
 # Functional tests for LOAD DATA statements.
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import time
 from copy import deepcopy
 from tests.common.impala_connection import FINISHED, PENDING, RUNNING
@@ -61,8 +59,10 @@ class TestLoadData(ImpalaTestSuite):
 
   def teardown_method(self, method):
     self._clean_test_tables()
+    super().teardown_method(method)
 
   def setup_method(self, method):
+    super().setup_method(method)
     # Defensively clean the data dirs if they exist.
     self._clean_test_tables()
 
@@ -112,21 +112,16 @@ class TestLoadData(ImpalaTestSuite):
 @SkipIfLocal.hdfs_client
 class TestLoadDataExternal(ImpalaTestSuite):
 
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestLoadDataExternal, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.ImpalaTestMatrix.add_dimension(
-        create_uncompressed_text_dimension(cls.get_workload()))
-
   def _clean_test_tables(self):
     self.client.execute("drop table if exists functional.{0}".format(TEST_TBL_NOPART_EXT))
     self.filesystem_client.delete_file_dir(TMP_STAGING_PATH, recursive=True)
 
   def teardown_method(self, method):
     self._clean_test_tables()
+    super().teardown_method(method)
 
   def setup_method(self, method):
+    super().setup_method(method)
     # Defensively clean the data dirs if they exist.
     self._clean_test_tables()
 

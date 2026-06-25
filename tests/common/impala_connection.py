@@ -19,7 +19,6 @@
 # in the future will support HS2 connections. Provides tracing around all
 # operations.
 
-from __future__ import absolute_import, division, print_function
 import abc
 import getpass
 import logging
@@ -27,7 +26,6 @@ import math
 import re
 import time
 
-from future.utils import with_metaclass
 import impala.dbapi as impyla
 import impala.error as impyla_error
 import impala.hiveserver2 as hs2
@@ -141,7 +139,7 @@ class OperationHandle(object):
 
 
 # Represents an Impala connection.
-class ImpalaConnection(with_metaclass(abc.ABCMeta, object)):
+class ImpalaConnection(metaclass=abc.ABCMeta):
 
   def __enter__(self):
     return self
@@ -321,7 +319,8 @@ class ImpalaConnection(with_metaclass(abc.ABCMeta, object)):
     'RUNNING', 'FINISHED', or 'ERROR'. If it does not reach the given state within
     'timeout' seconds, the method throws an AssertionError.
     """
-    self.wait_for_any_impala_state(operation_handle, [expected_impala_state], timeout)
+    return self.wait_for_any_impala_state(
+        operation_handle, [expected_impala_state], timeout)
 
   def wait_for_any_impala_state(self, operation_handle, expected_impala_states,
                                 timeout_s):
@@ -329,12 +328,14 @@ class ImpalaConnection(with_metaclass(abc.ABCMeta, object)):
     Each string in 'expected_impala_states' must either be 'INITIALIZED', 'PENDING',
     'RUNNING', 'FINISHED', or 'ERROR'. If it does not reach one of the given states
     within 'timeout' seconds, the method throws an AssertionError.
-    Returns the final state.
+    Returns a pair of the final state and the check times.
     """
     start_time = time.time()
     timeout_msg = None
+    num_checks = 0
     while True:
       impala_state = self.get_impala_exec_state(operation_handle)
+      num_checks += 1
       interval = time.time() - start_time
       if impala_state in expected_impala_states:
         # Reached one of expected_impala_states.
@@ -355,7 +356,7 @@ class ImpalaConnection(with_metaclass(abc.ABCMeta, object)):
 
     if timeout_msg is not None:
       raise tests.common.errors.Timeout(timeout_msg)
-    return impala_state
+    return impala_state, num_checks
 
   @abc.abstractmethod
   def wait_for_admission_control(self, operation_handle, timeout_s=60):
@@ -637,7 +638,8 @@ class ImpylaHS2Connection(ImpalaConnection):
     # Remove all async cursors.
     self.__async_cursors = list()
     try:
-      self.__impyla_conn.close()
+      if self.__impyla_conn:
+        self.__impyla_conn.close()
     except AttributeError as e:
       # When the HTTP endpoint restarts, Thrift HTTP will close the endpoint and calling
       # close() will result in an exception.
@@ -934,7 +936,7 @@ class ImpylaHS2ResultSet(object):
     that would have been returned via beeswax."""
     if val is None:
       return 'NULL'
-    if type(val) == float:
+    if isinstance(val, float):
       # Same format as what Beeswax uses in the backend.
       if math.isnan(val):
         return 'NaN'

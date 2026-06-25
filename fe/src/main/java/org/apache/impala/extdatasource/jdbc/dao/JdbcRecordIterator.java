@@ -57,6 +57,15 @@ public class JdbcRecordIterator {
   private final PreparedStatement ps;
   private final ResultSet rs;
   private final List<String> jdbcColumnNames;
+  private final Object fetchLock = new Object();
+  private final Calendar utcCalendar =
+      Calendar.getInstance(TimeZone.getTimeZone(ZoneOffset.UTC));
+
+  /**
+   * Tracks whether the ResultSet has been fully consumed. Guarded by fetchLock.
+   * This flag ensures we never call next() after reaching end-of-stream.
+   */
+  private boolean endOfStream = false;
 
   public JdbcRecordIterator(Connection conn, PreparedStatement ps, ResultSet rs,
       Configuration conf) throws JdbcDatabaseAccessException {
@@ -182,6 +191,102 @@ public class JdbcRecordIterator {
       } catch (SQLException throwables) {
         colData.addToIs_null(true);
       }
+    }
+  }
+
+  /**
+   * Reads the raw JDBC value for one column at the current cursor position.
+   * Must be called while holding fetchLock.
+   */
+  private Object readColumnValue(TScalarType scalarType, int colIdx) throws SQLException {
+    String columnName = jdbcColumnNames.get(colIdx);
+    switch (scalarType.type) {
+      case TIMESTAMP:
+        return rs.getTimestamp(columnName, utcCalendar);
+      case DECIMAL:
+        return rs.getBigDecimal(columnName);
+      case DATE:
+        return rs.getDate(columnName);
+      default:
+        return rs.getObject(columnName);
+    }
+  }
+
+  /**
+   * Result of a single {@link #fetchBatch} call. Bundles the fetched rows together with
+   * nanosecond-precision timing counters that the caller can propagate back to the C++
+   * runtime profile.
+   */
+  public static final class FetchResult {
+    /** Rows fetched in this call. Never null; empty when the cursor is exhausted. */
+    public final List<Object[]> rows;
+    /** Nanoseconds the thread held fetchLock while iterating the JDBC cursor. */
+    public final long cursorFetchNs;
+    /** Nanoseconds the thread waited to acquire fetchLock. */
+    public final long lockWaitNs;
+
+    FetchResult(List<Object[]> rows, long lockWaitNs, long cursorFetchNs) {
+      this.rows = rows;
+      this.lockWaitNs = lockWaitNs;
+      this.cursorFetchNs = cursorFetchNs;
+    }
+  }
+
+  /**
+   * Fetches up to {@code batchSize} rows from the JDBC cursor under a SINGLE lock
+   * acquisition. Holding the lock for the whole batch means MT_DOP scanner threads
+   * hand off cursor ownership in large chunks: while one thread materializes its batch
+   * the next thread fetches its batch — true pipeline parallelism with no per-row
+   * lock contention.
+   *
+   * @return a {@link FetchResult} containing the fetched rows and nanosecond timing
+   *     counters for lock-wait and cursor-fetch phases.
+   */
+  public FetchResult fetchBatch(TScalarType[] scalarTypes, int batchSize)
+      throws JdbcDatabaseAccessException {
+    try {
+      final String tname = Thread.currentThread().getName();
+      final long lockWaitStart = System.nanoTime();
+      synchronized (fetchLock) {
+        final long lockAcquired = System.nanoTime();
+        List<Object[]> rows = new ArrayList<>(batchSize);
+
+        // Fast-path: If a previous thread exhausted the ResultSet, return empty batch
+        // immediately. This prevents calling rs.next() after EOS, which is vendor
+        // specific behavior for TYPE_FORWARD_ONLY ResultSets (may throw SQLException).
+        if (endOfStream) {
+          final long fetchDoneNs = System.nanoTime();
+          LOGGER.debug("[{}] fetchBatch: already at EOS, returning empty batch", tname);
+          return new FetchResult(rows, fetchDoneNs - lockAcquired, 0);
+        }
+
+        while (rows.size() < batchSize) {
+          if (!rs.next()) {
+            endOfStream = true;
+            break;
+          }
+          Object[] row = new Object[scalarTypes.length];
+          for (int i = 0; i < scalarTypes.length; i++) {
+            row[i] = readColumnValue(scalarTypes[i], i);
+          }
+          rows.add(row);
+        }
+        final long fetchDoneNs = System.nanoTime();
+        final long lockWaitNs = lockAcquired - lockWaitStart;
+        final long cursorFetchNs = fetchDoneNs - lockAcquired;
+        LOGGER.debug("[{}] fetchBatch: waited_for_lock={}ms jdbc_fetch={}ms " +
+            "rows={} eos={}",
+            tname,
+            lockWaitNs / 1_000_000,
+            cursorFetchNs / 1_000_000,
+            rows.size(),
+            endOfStream);
+        return new FetchResult(rows, lockWaitNs, cursorFetchNs);
+      }
+    } catch (Exception e) {
+      LOGGER.warn("fetchBatch() exception", e);
+      throw new JdbcDatabaseAccessException(
+          "Error fetching JDBC batch: " + e.getMessage(), e);
     }
   }
 

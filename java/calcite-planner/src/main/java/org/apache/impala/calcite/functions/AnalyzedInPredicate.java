@@ -23,7 +23,6 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.impala.analysis.Analyzer;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.InPredicate;
-import org.apache.impala.catalog.Function;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.AnalysisException;
 
@@ -40,24 +39,14 @@ public class AnalyzedInPredicate extends InPredicate {
   protected static final Logger LOG =
       LoggerFactory.getLogger(AnalyzedInPredicate.class.getName());
 
-  // Need to save the function because it is known at constructor time. The
-  // resetAnalyzeState() method can be called at various points which could
-  // set the fn_ member to null. So we save the function in the savedFunction_
-  // variable so it can be properly set in analyzeImpl()
-  private final Function savedFunction_;
-
-  public AnalyzedInPredicate(RexCall call, List<Expr> params, Analyzer analyzer)
+  public AnalyzedInPredicate(RexCall call, List<Expr> params)
       throws AnalysisException {
     super(params.get(0), params.subList(1, params.size()),
         call.getKind().equals(SqlKind.NOT_IN));
-    this.savedFunction_ = getFunction(analyzer, true);
-
-    this.type_ = Type.BOOLEAN;
   }
 
   public AnalyzedInPredicate(AnalyzedInPredicate other) {
     super(other);
-    this.savedFunction_ = other.savedFunction_;
   }
 
   @Override
@@ -68,7 +57,7 @@ public class AnalyzedInPredicate extends InPredicate {
   @Override
   protected void analyzeImpl(Analyzer analyzer) throws AnalysisException {
     this.computeSelectivity();
-    this.fn_ = savedFunction_;
+    this.fn_ = getFunction(analyzer, true);
     this.type_ = Type.BOOLEAN;
   }
 

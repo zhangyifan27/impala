@@ -63,6 +63,7 @@
 #include "util/impalad-metrics.h"
 #include "util/jwt-util-internal.h"
 #include "util/jwt-util.h"
+#include "util/malloc-util.h"
 #include "util/mem-info.h"
 #include "util/memory-metrics.h"
 #include "util/metrics.h"
@@ -144,6 +145,7 @@ DECLARE_bool(is_executor);
 DECLARE_string(webserver_interface);
 DECLARE_int32(webserver_port);
 DECLARE_int64(tcmalloc_max_total_thread_cache_bytes);
+DECLARE_bool(tcmalloc_aggressive_memory_decommit);
 DECLARE_string(admission_service_host);
 DECLARE_int32(admission_service_port);
 DECLARE_string(catalog_service_host);
@@ -252,7 +254,6 @@ ExecEnv::ExecEnv(int krpc_port, int subscriber_port, int webserver_port,
     thread_mgr_(new ThreadResourceMgr),
     tmp_file_mgr_(new TmpFileMgr),
     frontend_(external_fe ? nullptr : new Frontend()),
-    async_rpc_pool_(new CallableThreadPool("rpc-pool", "async-rpc-sender", 8, 10000)),
     query_exec_mgr_(new QueryExecMgr()),
     tuple_cache_mgr_(new TupleCacheMgr(metrics_.get())),
     rpc_metrics_(metrics_->GetOrCreateChildGroup("rpc")),
@@ -356,7 +357,6 @@ Status ExecEnv::Init() {
   if (FLAGS_is_coordinator) {
     RETURN_IF_ERROR(hdfs_op_thread_pool_->Init());
   }
-  RETURN_IF_ERROR(async_rpc_pool_->Init());
 
   int64_t bytes_limit;
   RETURN_IF_ERROR(ChooseProcessMemLimit(&bytes_limit));
@@ -416,6 +416,17 @@ Status ExecEnv::Init() {
 
   LOG(INFO) << "Admit memory limit: "
             << PrettyPrinter::Print(admit_mem_limit_, TUnit::BYTES);
+
+  // Initialize malloc settings
+  // This needs to happen before initializing the buffer pool, because the buffer pool
+  // verifies the support for huge pages.
+
+  // Bump thread cache to 1GB to reduce contention for TCMalloc central
+  // list's spinlock.
+  if (FLAGS_tcmalloc_max_total_thread_cache_bytes == 0) {
+    FLAGS_tcmalloc_max_total_thread_cache_bytes = 1 << 30;
+  }
+  RETURN_IF_ERROR(MallocUtil::GetInstance()->Init(admit_mem_limit_));
 
   int64_t buffer_pool_limit = ParseUtil::ParseMemSpec(FLAGS_buffer_pool_limit,
       &is_percent, admit_mem_limit_);
@@ -483,55 +494,13 @@ Status ExecEnv::Init() {
   RETURN_IF_ERROR(data_svc_->Init());
   RETURN_IF_ERROR(stream_mgr_->Init(data_svc_->mem_tracker()));
 
-  // Bump thread cache to 1GB to reduce contention for TCMalloc central
-  // list's spinlock.
-  if (FLAGS_tcmalloc_max_total_thread_cache_bytes == 0) {
-    FLAGS_tcmalloc_max_total_thread_cache_bytes = 1 << 30;
+  // A MemTracker for malloc overhead
+  IntGauge* overhead_gauge = MallocUtil::GetInstance()->GetOverheadBytesMetric();
+  if (overhead_gauge != nullptr) {
+    obj_pool_->Add(
+        new MemTracker(overhead_gauge, -1, Substitute("$0 Overhead",
+            MallocUtil::GetInstance()->GetName()), mem_tracker_.get()));
   }
-
-#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
-  const static char* TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES =
-    "tcmalloc.max_total_thread_cache_bytes";
-  // Change the total TCMalloc thread cache size if necessary.
-  if (FLAGS_tcmalloc_max_total_thread_cache_bytes > 0 &&
-      !MallocExtension::instance()->SetNumericProperty(
-          TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES,
-          FLAGS_tcmalloc_max_total_thread_cache_bytes)) {
-    return Status(Substitute("Failed to change {0}",
-        TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES));
-  }
-  // Read the value back from tcmalloc to verify it matches what we set.
-  size_t actual_max_total_thread_cache_bytes = 0;
-  bool retval = MallocExtension::instance()->GetNumericProperty(
-    TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES,
-    &actual_max_total_thread_cache_bytes);
-  if (!retval) {
-    return Status(Substitute("Could not retrieve value of {0}.",
-        TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES));
-  }
-  if (actual_max_total_thread_cache_bytes !=
-      FLAGS_tcmalloc_max_total_thread_cache_bytes) {
-    LOG(WARNING) << "Set " << TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES << " to "
-                 << FLAGS_tcmalloc_max_total_thread_cache_bytes << " bytes but actually "
-                 << "using " << actual_max_total_thread_cache_bytes << " bytes.";
-  }
-
-  // A MemTracker for TCMalloc overhead which is the difference between the physical bytes
-  // reserved (TcmallocMetric::PHYSICAL_BYTES_RESERVED) and the bytes in use
-  // (TcmallocMetrics::BYTES_IN_USE). This overhead accounts for all the cached freelists
-  // used by TCMalloc.
-  IntGauge* negated_bytes_in_use = obj_pool_->Add(new NegatedGauge(
-      MakeTMetricDef("negated_tcmalloc_bytes_in_use", TMetricKind::GAUGE, TUnit::BYTES),
-      TcmallocMetric::BYTES_IN_USE));
-  vector<IntGauge*> overhead_metrics;
-  overhead_metrics.push_back(negated_bytes_in_use);
-  overhead_metrics.push_back(TcmallocMetric::PHYSICAL_BYTES_RESERVED);
-  SumGauge* tcmalloc_overhead = obj_pool_->Add(new SumGauge(
-      MakeTMetricDef("tcmalloc_overhead", TMetricKind::GAUGE, TUnit::BYTES),
-      overhead_metrics));
-  obj_pool_->Add(
-      new MemTracker(tcmalloc_overhead, -1, "TCMalloc Overhead", mem_tracker_.get()));
-#endif
   mem_tracker_->RegisterMetrics(metrics_.get(), "mem-tracker.process");
 
   RETURN_IF_ERROR(disk_io_mgr_->Init());
@@ -653,19 +622,8 @@ void ExecEnv::SetImpalaServer(ImpalaServer* server) {
   }
 }
 
-void ExecEnv::InitTcMallocAggressiveDecommit() {
-#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
-  // Aggressive decommit is required so that unused pages in the TCMalloc page heap are
-  // not backed by physical pages and do not contribute towards memory consumption.
-  // Enable it in TCMalloc before InitBufferPool().
-  MallocExtension::instance()->SetNumericProperty(
-      "tcmalloc.aggressive_memory_decommit", 1);
-#endif
-}
-
 void ExecEnv::InitBufferPool(int64_t min_buffer_size, int64_t capacity,
     int64_t clean_pages_limit) {
-  InitTcMallocAggressiveDecommit();
   buffer_pool_.reset(
       new BufferPool(metrics_.get(), min_buffer_size, capacity, clean_pages_limit));
   buffer_reservation_.reset(new ReservationTracker());
@@ -709,6 +667,10 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
         int64_t allocated_from_sys = BufferPoolMetric::SYSTEM_ALLOCATED->GetValue();
         if (reserved >= allocated_from_sys) return;
         buffer_pool->ReleaseMemory(min(bytes_to_free, allocated_from_sys - reserved));
+    });
+    mem_tracker_->AddGcFunction([] (int64_t bytes_to_free)
+    {
+        MallocUtil::GetInstance()->ReleaseMemoryToSystem(bytes_to_free);
     });
   }
 }

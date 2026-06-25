@@ -19,6 +19,7 @@
 
 #include "common/constant-strings.h"
 #include "common/names.h"
+#include "common/status-serialization.h"
 #include "gen-cpp/admission_control_service.pb.h"
 #include "gutil/strings/substitute.h"
 #include "kudu/rpc/rpc_context.h"
@@ -64,6 +65,11 @@ DEFINE_int32(admission_status_wait_time_ms, 100,
     "(Advanced) The number of milliseconds the GetQueryStatus() rpc in the admission "
     "control service will wait for admission to complete before returning.");
 
+METRIC_DEFINE_histogram(server, admission_control_service_incoming_queue_time,
+    "Admission Control Service RPC Queue Time", kudu::MetricUnit::kMicroseconds,
+    "Number of microseconds incoming RPC requests spend in the worker queue",
+    kudu::MetricLevel::kInfo, 60000000LU, 3);
+
 namespace impala {
 
 #define RESPOND_IF_ERROR(stmt)                          \
@@ -102,10 +108,14 @@ Status AdmissionControlService::Init() {
   int num_svc_threads = FLAGS_admission_control_service_num_svc_threads > 0 ?
       FLAGS_admission_control_service_num_svc_threads :
       CpuInfo::num_cores();
+  RpcMgr* rpc_mgr = AdmissiondEnv::GetInstance()->rpc_mgr();
   // The maximum queue length is set to maximum 32-bit value. Its actual capacity is
   // bound by memory consumption against 'mem_tracker_'.
-  RETURN_IF_ERROR(AdmissiondEnv::GetInstance()->rpc_mgr()->RegisterService(
-      num_svc_threads, std::numeric_limits<int32_t>::max(), this, mem_tracker_.get(),
+  RETURN_IF_ERROR(rpc_mgr->RegisterService(
+      num_svc_threads, std::numeric_limits<int32_t>::max(),
+      METRIC_admission_control_service_incoming_queue_time.Instantiate(
+          rpc_mgr->metric_entity()),
+      this, mem_tracker_.get(),
       AdmissiondEnv::GetInstance()->rpc_metrics()));
 
   admission_thread_pool_.reset(
@@ -227,7 +237,9 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
       TRuntimeProfileTree tree;
       admission_state->summary_profile->ToThrift(&tree);
       int sidecar_idx;
-      Status sidecar_status = SetFaststringSidecar(tree, rpc_context, &sidecar_idx);
+      int64_t sidecar_length = 0;
+      Status sidecar_status = SetFaststringSidecar(tree, rpc_context, &sidecar_idx,
+          &sidecar_length);
       if (!sidecar_status.ok()) {
         // We don't need to fail the query just because we can't return the profile, so
         // just log the error.
@@ -400,7 +412,7 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
 template <typename ResponsePBType>
 void AdmissionControlService::RespondAndReleaseRpc(
     const Status& status, ResponsePBType* response, RpcContext* rpc_context) {
-  status.ToProto(response->mutable_status());
+  StatusToProto(status, response->mutable_status());
   // Release the memory against the control service's memory tracker.
   mem_tracker_->Release(rpc_context->GetTransferSize());
   rpc_context->RespondSuccess();

@@ -40,7 +40,7 @@ under the License.
     <dependency>
       <groupId>org.apache.calcite</groupId>
       <artifactId>calcite-core</artifactId>
-      <version>1.37.0</version>
+      <version>1.41.0</version>
     </dependency>
     <dependency>
       <groupId>org.apache.calcite.avatica</groupId>
@@ -59,14 +59,13 @@ under the License.
       <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+    </dependency>
   </dependencies>
 
  <build>
-     <resources>
-       <resource>
-         <directory>${env.IMPALA_HOME}/fe/src/test/resources</directory>
-       </resource>
-     </resources>
      <pluginManagement>
       <plugins>
         <plugin>

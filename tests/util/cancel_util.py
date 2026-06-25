@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import threading
 from time import sleep
 import traceback
@@ -110,6 +109,7 @@ class FetchingThread(threading.Thread):
     self.query_profile = None
     self.handle = None
     self.is_error = False
+    self.query_id = None
 
   def execute_async(self):
     # change database.
@@ -120,6 +120,7 @@ class FetchingThread(threading.Thread):
     # execute the query.
     self.handle = self.client.execute_async(self.query)
     self.is_error = self.client.get_impala_exec_state(self.handle) == ERROR
+    self.query_id = self.client.handle_id(self.handle)
 
   def run(self):
     if self.is_error:

@@ -17,11 +17,9 @@
 #
 # Impala tests for ALTER TABLE RECOVER PARTITIONS statement
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import os
 import shutil
-from six.moves import urllib
+import urllib.parse
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfLocal, SkipIfFS, SkipIfCatalogV2
 from tests.common.test_dimensions import (
@@ -394,7 +392,7 @@ class TestRecoverPartitions(ImpalaTestSuite):
 
   @SkipIfLocal.hdfs_client
   @SkipIfFS.empty_directory
-  def test_empty_directory(self, vector, unique_database):
+  def test_empty_directory(self, unique_database):
     """Explicitly test how empty directories are handled when partitions are recovered."""
 
     TBL_NAME = "test_recover_partitions"

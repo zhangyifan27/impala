@@ -17,7 +17,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import os
 
 HIVE_MAJOR_VERSION = int(os.environ['IMPALA_HIVE_VERSION'][0])
@@ -25,9 +24,10 @@ USE_APACHE_HIVE_3 = os.environ['USE_APACHE_HIVE_3']
 KERBERIZE = os.environ.get('IMPALA_KERBERIZE') == 'true'
 VARIANT = os.environ.get('HIVE_VARIANT')
 IMPALA_JAVA_TOOL_OPTIONS=os.environ.get("IMPALA_JAVA_TOOL_OPTIONS")
+HDFS_REPLICATION=os.environ.get("HDFS_REPLICATION")
 
 CONFIG = {
-  'dfs.replication': '3'
+  'dfs.replication': HDFS_REPLICATION
 }
 
 # General Hive configuration.

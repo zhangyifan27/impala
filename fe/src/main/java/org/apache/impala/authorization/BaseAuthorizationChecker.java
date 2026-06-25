@@ -25,11 +25,8 @@ import org.apache.impala.analysis.Analyzer;
 import org.apache.impala.authorization.Authorizable.Type;
 import org.apache.impala.catalog.FeCatalog;
 import org.apache.impala.catalog.FeDb;
-import org.apache.impala.catalog.FeIncompleteTable;
-import org.apache.impala.catalog.FeTable;
 import org.apache.impala.common.InternalException;
 import org.apache.impala.common.Pair;
-import org.apache.impala.service.BackendConfig;
 import org.apache.impala.util.EventSequence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -160,11 +157,13 @@ public abstract class BaseAuthorizationChecker implements AuthorizationChecker {
             // CopyTestCaseStmt#analyze().
             Preconditions.checkState(ALLOWED_HIER_AUTHZ_TABLE_PRIVILEGES
                 .contains(privReq.getPrivilege()));
-            requests = tablePrivReqs.computeIfAbsent(tableName, k -> new ArrayList<>());
+            requests = tablePrivReqs.computeIfAbsent(tableName.toLowerCase(),
+                k -> new ArrayList<>());
             requests.add(privReq);
           } else {
             Preconditions.checkState(privReq.getAuthorizable().getType() == Type.COLUMN);
-            requests = columnPrivReqs.computeIfAbsent(tableName, k -> new ArrayList<>());
+            requests = columnPrivReqs.computeIfAbsent(tableName.toLowerCase(),
+                k -> new ArrayList<>());
             requests.add(privReq);
           }
         }
@@ -177,7 +176,8 @@ public abstract class BaseAuthorizationChecker implements AuthorizationChecker {
       // authorizeTableAccess() below.
       for (Map.Entry<String, List<PrivilegeRequest>> entry : columnPrivReqs.entrySet()) {
         List<PrivilegeRequest> privReqs = tablePrivReqs.get(entry.getKey());
-        Preconditions.checkState(privReqs != null);
+        Preconditions.checkState(privReqs != null, "There is no corresponding " +
+            "table-level privilege request for the table: %s", entry.getKey());
         privReqs.addAll(entry.getValue());
       }
 

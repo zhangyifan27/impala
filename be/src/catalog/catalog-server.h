@@ -50,7 +50,7 @@ class StatestoreSubscriber;
 /// The CatalogService directly handles executing metadata update requests
 /// (DDL requests) from clients via a Thrift interface.
 /// The CatalogServer has two main components - a C++ daemon that has the Statestore
-/// integration code, Thrift service implementiation, and exporting of the debug
+/// integration code, Thrift service implementation, and exporting of the debug
 /// webpage/metrics.
 /// The other main component is written in Java and manages caching and updating of all
 /// metadata. For each Statestore heartbeat, the C++ Server queries the Java metadata
@@ -410,6 +410,11 @@ class CatalogServer {
       const TGetOperationUsageResponse& response, rapidjson::Document* document);
   void GetCatalogOpRecords(
       const TGetOperationUsageResponse& response, rapidjson::Document* document);
+
+  /// Debug webpage handler for detailed catalog operation information.
+  /// Shows details for a single operation identified by query_id and thread_id.
+  void OperationDetailUrlCallback(
+      const Webserver::WebRequest& req, rapidjson::Document* document);
 
   /// Debug webpage handler that is used to dump all the registered metrics of a
   /// table. The caller specifies the "name" parameter which is the fully

@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import pytest
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
@@ -42,7 +41,7 @@ class TestDisableFeatures(CustomClusterTestSuite):
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args("--allow_ordinals_in_having=true")
-  def test_allow_ordinals_in_having(self, vector):
+  def test_allow_ordinals_in_having(self):
     """Mirror the FE tests in AnalyzeStmtsTest#TestHavingIntegers to make sure the flag
        can bring back the legacy feature"""
     self.client.execute("select not bool_col as nb from functional.alltypes having 1")

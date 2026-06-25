@@ -18,13 +18,11 @@
 
 # Tests statestore with non-default startup options
 
-from __future__ import absolute_import, division, print_function
 import logging
 import socket
 from time import sleep
 import uuid
 
-from builtins import range
 import pytest
 from thrift.protocol import TBinaryProtocol
 from thrift.transport import TSocket, TTransport
@@ -71,6 +69,8 @@ class TestCustomStatestore(CustomClusterTestSuite):
       # supported. Exception "Invalid method name: 'GetProtocolVersion'" is thrown
       # by Thrift client.
       assert False, str(e)
+    finally:
+      client_transport.close()
 
   def __register_subscriber(self, ss_protocol=Subscriber.StatestoreServiceVersion.V2,
                             in_v2_format=True, expect_exception=False):
@@ -98,6 +98,8 @@ class TestCustomStatestore(CustomClusterTestSuite):
       return response
     except Exception as e:
       assert expect_exception, str(e)
+    finally:
+      client_transport.close()
 
   @CustomClusterTestSuite.with_args(statestored_args="-statestore_max_subscribers=3")
   def test_statestore_max_subscribers(self):
@@ -122,7 +124,7 @@ class TestCustomStatestore(CustomClusterTestSuite):
       impalad_args="--statestore_subscriber_use_resolved_address=true",
       catalogd_args="--statestore_subscriber_use_resolved_address=true",
       disable_log_buffering=True)
-  def test_subscriber_with_resolved_address(self, vector):
+  def test_subscriber_with_resolved_address(self):
     # Ensure cluster has started up by running a query.
     result = self.execute_query("select count(*) from functional_parquet.alltypes")
     assert result.success, str(result)

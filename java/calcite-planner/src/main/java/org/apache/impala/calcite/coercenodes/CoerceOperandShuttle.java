@@ -18,7 +18,6 @@
 package org.apache.impala.calcite.coercenodes;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import org.apache.calcite.plan.Strong;
@@ -102,6 +101,21 @@ public class CoerceOperandShuttle extends RexShuttle {
     // is complete.
     if (call.getOperator().getKind().equals(SqlKind.SEARCH)) {
       return visitCall((RexCall) RexUtil.expandSearch(rexBuilder, null, call));
+    }
+
+    // Somewhere between 1.37 and 1.40, Calcite added its own coercion for
+    // string types underneath a Union RelNode. For example, It may detect a char(3)
+    // type and coerce it by casting it to a char(7) type. Impala always casts
+    // literal strings as type STRING rather than Calcite's CHAR(x), so it will
+    // still need coercion.
+    //
+    // The normal mechanism of handling this is through the "visitLiteral" which gets
+    // called through the Shuttle class. Unfortunately, Calcite has another issue that
+    // it doesn't change the RelDataType when calling super.visitCall() for a cast
+    // RexLiteral. To handle this, we visit the RexLiteral directly, which still
+    // changes the type to a STRING.
+    if (isImplicitCharCastOfLiteral(call)) {
+      return visitLiteral((RexLiteral) call.getOperands().get(0));
     }
 
     // recursively call all embedded RexCalls first
@@ -282,6 +296,22 @@ public class CoerceOperandShuttle extends RexShuttle {
     }
 
     return true;
+  }
+
+  private boolean isImplicitCharCastOfLiteral(RexCall call) {
+    if (call.getKind() != SqlKind.CAST) {
+      return false;
+    }
+
+    if (call.getType().getSqlTypeName() != SqlTypeName.CHAR) {
+      return false;
+    }
+
+    if (!(call.getOperands().get(0) instanceof RexLiteral)) {
+      return false;
+    }
+
+    return call.getOperands().get(0).getType().getSqlTypeName() == SqlTypeName.CHAR;
   }
 
   private static boolean isTimestampArithExpr(RexCall rexCall) {

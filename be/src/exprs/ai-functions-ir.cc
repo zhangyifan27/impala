@@ -23,9 +23,12 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <gutil/strings/util.h>
 #include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "common/compiler-util.h"
 #include "exprs/ai-functions.h"
+#include "util/openssl-util.h"
 
 using namespace impala_udf;
 using boost::algorithm::trim;
@@ -53,6 +56,9 @@ const string AiFunctions::AI_GENERATE_TXT_N_OVERRIDE_FORBIDDEN_ERROR =
     "Invalid override, 'n' must be of integer type and have value 1";
 const string AiFunctions::AI_GENERATE_TXT_COMMON_ERROR_PREFIX =
     "AI Generate Text Error: ";
+const string AiFunctions::AI_GENERATE_TXT_FIPS_UNSUPPORTED_ERROR =
+    AiFunctions::AI_GENERATE_TXT_COMMON_ERROR_PREFIX
+    + "This function is disabled in FIPS mode";
 string AiFunctions::ai_api_key_;
 const char* AiFunctions::OPEN_AI_REQUEST_FIELD_CONTENT_TYPE_HEADER =
     "Content-Type: application/json";
@@ -70,6 +76,7 @@ const char* AiFunctions::OPEN_AI_PUBLIC_ENDPOINT = "api.openai.com";
 static const char* OPEN_AI_RESPONSE_FIELD_CHOICES = "choices";
 static const char* OPEN_AI_RESPONSE_FIELD_MESSAGE = "message";
 static const char* OPEN_AI_RESPONSE_FIELD_CONTENT = "content";
+static const char* OPEN_AI_RESPONSE_FIELD_TOOL_CALLS = "tool_calls";
 
 /**
  * Singleton class for managing the additional AI platforms endpoints.
@@ -196,13 +203,22 @@ string AiFunctions::AiGenerateTextParseOpenAiResponse(const string_view& respons
 
   // Access the "content" field within "message"
   const rapidjson::Value& message = firstChoice[OPEN_AI_RESPONSE_FIELD_MESSAGE];
-  if (!message.HasMember(OPEN_AI_RESPONSE_FIELD_CONTENT)
-      || !message[OPEN_AI_RESPONSE_FIELD_CONTENT].IsString()) {
-    LOG(WARNING) << AI_GENERATE_TXT_JSON_PARSE_ERROR << ": " << response;
-    return AI_GENERATE_TXT_JSON_PARSE_ERROR;
+  if (message.HasMember(OPEN_AI_RESPONSE_FIELD_CONTENT)
+      && message[OPEN_AI_RESPONSE_FIELD_CONTENT].IsString()) {
+    return message[OPEN_AI_RESPONSE_FIELD_CONTENT].GetString();
   }
 
-  return message[OPEN_AI_RESPONSE_FIELD_CONTENT].GetString();
+  // Native tool-calling responses can set content=null and provide tool_calls.
+  if (message.HasMember(OPEN_AI_RESPONSE_FIELD_TOOL_CALLS)
+      && message[OPEN_AI_RESPONSE_FIELD_TOOL_CALLS].IsArray()) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    message.Accept(writer);
+    return string(buffer.GetString(), buffer.GetSize());
+  }
+
+  LOG(WARNING) << AI_GENERATE_TXT_JSON_PARSE_ERROR << ": " << response;
+  return AI_GENERATE_TXT_JSON_PARSE_ERROR;
 }
 
 template <bool fastpath>
@@ -210,6 +226,11 @@ StringVal AiFunctions::AiGenerateTextHelper(FunctionContext* ctx,
     const StringVal& endpoint, const StringVal& prompt, const StringVal& model,
     const StringVal& auth_credential, const StringVal& platform_params,
     const StringVal& impala_options) {
+  DCHECK(ctx != nullptr);
+  if (UNLIKELY(IsFIPSMode())) {
+    ctx->SetError(AI_GENERATE_TXT_FIPS_UNSUPPORTED_ERROR.c_str());
+    return StringVal::null();
+  }
   string_view endpoint_sv(FLAGS_ai_endpoint);
   // endpoint validation
   if (!fastpath && endpoint.ptr != nullptr && endpoint.len != 0) {

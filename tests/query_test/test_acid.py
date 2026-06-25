@@ -17,7 +17,7 @@
 
 # Functional tests for ACID integration with Hive.
 
-from __future__ import absolute_import, division, print_function
+from copy import deepcopy
 import os
 from subprocess import check_call
 import time
@@ -240,9 +240,12 @@ class TestAcid(ImpalaTestSuite):
 
   @SkipIfFS.hive
   def test_lock_timings(self, vector, unique_database):
-    def elapsed_time_for_query(query):
+    def elapsed_time_for_query(query, lock_max_wait_time=None):
       t_start = time.time()
-      self.execute_query_expect_failure(self.client, query)
+      query_options = deepcopy(vector.get_exec_option_dict())
+      if lock_max_wait_time is not None:
+        query_options['lock_max_wait_time_s'] = lock_max_wait_time
+      self.execute_query_expect_failure(self.client, query, query_options=query_options)
       return time.time() - t_start
 
     tbl_name = "test_lock"
@@ -256,31 +259,31 @@ class TestAcid(ImpalaTestSuite):
       if self.exploration_strategy() == 'exhaustive':
         elapsed = elapsed_time_for_query("insert into {} values (1)".format(tbl))
         assert elapsed > 300 and elapsed < 310
-      self.execute_query("set lock_max_wait_time_s=20")
-      elapsed = elapsed_time_for_query("insert into {} values (1)".format(tbl))
+      elapsed = elapsed_time_for_query(
+          "insert into {} values (1)".format(tbl), lock_max_wait_time=20)
       assert elapsed > 20 and elapsed < 28
 
-      self.execute_query("set lock_max_wait_time_s=0")
-      elapsed = elapsed_time_for_query("insert into {} values (1)".format(tbl))
+      elapsed = elapsed_time_for_query(
+          "insert into {} values (1)".format(tbl), lock_max_wait_time=0)
       assert elapsed < 8
 
-      self.execute_query("set lock_max_wait_time_s=10")
-      elapsed = elapsed_time_for_query("insert into {} values (1)".format(tbl))
+      elapsed = elapsed_time_for_query(
+          "insert into {} values (1)".format(tbl), lock_max_wait_time=10)
       assert elapsed > 10 and elapsed < 18
 
-      self.execute_query("set lock_max_wait_time_s=2")
-      elapsed = elapsed_time_for_query("truncate table {}".format(tbl))
+      elapsed = elapsed_time_for_query(
+          "truncate table {}".format(tbl), lock_max_wait_time=2)
       assert elapsed > 2 and elapsed < 10
 
-      self.execute_query("set lock_max_wait_time_s=5")
-      elapsed = elapsed_time_for_query("drop table {}".format(tbl))
+      elapsed = elapsed_time_for_query(
+          "drop table {}".format(tbl), lock_max_wait_time=5)
       assert elapsed > 5 and elapsed < 13
     finally:
       acid_util.unlock(lock_resp.lockid)
 
   @SkipIfHive2.acid
   @SkipIfFS.hive
-  def test_in_progress_compactions(self, vector, unique_database):
+  def test_in_progress_compactions(self, unique_database):
     """Checks that in-progress compactions are not visible. The test mimics
     in-progress compactions by opening a transaction and creating a new base
     directory. The new base directory is empty and must not have an effect
@@ -328,7 +331,7 @@ class TestAcid(ImpalaTestSuite):
     result = self.execute_query("select count(*) from {0}".format(fq_table_name))
     assert "3" in result.data
 
-  def test_add_partition_write_id(self, vector, unique_database):
+  def test_add_partition_write_id(self, unique_database):
     """Test that ALTER TABLE ADD PARTITION increases the write id of the table."""
     # Test INSERT-only table
     io_tbl_name = "insert_only_table"

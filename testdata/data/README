@@ -1199,6 +1199,76 @@ iceberg_v2_null_delete_record:
   * manually edited the metadata JSON, and the manifest and manifest list files to
     register the delete files in the table
 
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_deletion_vectors
+Iceberg V3 table created by Spark 4.0.2.
+Built Spark with the following:
+> ./build/mvn -Phive -Phive-thriftserver -DskipTests clean package
+Copy Impala's core-site.xml, hdfs-site.xml, hive-site.xml into Spark's conf/ directory.
+Run spark-shell with the following command:
+> bin/spark-shell --jars iceberg-spark-runtime-4.0_2.13-1.10.1.jar \
+                  --conf spark.sql.catalogImplementation=hive \
+                  --conf spark.sql.catalog.spark_catalog.type=hive \
+                  --conf spark.sql.catalog.spark_catalog=org.apache.iceberg.spark.SparkSessionCatalog
+Then Spark SQL commands were used to create the tables:
+sql("create table iceberg_v3_deletion_vectors (i int) using iceberg options('format-version'='3', 'write.delete.mode'='merge-on-read', 'write.update.mode'='merge-on-read')").collect()
+...
+
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_default_value
+Iceberg V3 table created by Spark 4.0.2, see above (iceberg_v3_deletion_vectors).
+Since Spark still doesn't support default values, the metadata.json file was edited
+manually to set the default value for column 'j':
+{"id":2,"name":"j","required":false,"type":"int","initial-default":-1,"write-default":-1}
+
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_default_value_orc
+Same as iceberg_v3_default_value, but with ORC data files (tblproperty write.format.default=orc).
+
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_default_value_avro
+Same as iceberg_v3_default_value, but with Avro data files (tblproperty write.format.default=avro).
+
+testdata/data/iceberg_test/iceberg_v3/test_default_part
+Iceberg V3 table with an identity-partitioned column that uses initial-default
+in metadata (for partition-default behavior in tests). Created with
+Spark/Iceberg similarly to iceberg_v3_deletion_vectors, then modified:
+  1. Initial table: column i (int), inserted (1), (2)
+  2. Added column j (int), added partition by spec (j)
+  3. Inserted (3, 5), (4, 10), (5, NULL)
+  4. Manually set initial-default=-1 for column j in metadata JSON files
+The table exercises initial-default on partition columns where older files (from before
+the schema evolution) lack values for j, which should read as -1.
+
+testdata/data/iceberg_test/iceberg_v3/test_complex_default
+Iceberg V3 table for negative tests: struct column with an initial-default on a nested
+primitive field. Created with Spark/Iceberg, then copied from HDFS:
+  1. Initial table: column i (int), inserted (1)
+  2. ALTER TABLE ADD COLUMNS (j STRUCT<f1: INT, f2: STRING>, ts_tz TIMESTAMPTZ)
+  3. Inserted (2, named_struct('f1', 100, 'f2', 'hello'), TIMESTAMP '2024-12-25 18:30:45.123456')
+  4. Manually added initial-default=-1 to nested field j.f1 (field id 3) and
+     initial-default="2024-01-15T10:30:45.123456+00:00" to ts_tz (field id 5) in metadata
+Impala should reject scans that materialize any nested field with a default.
+
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_all_types
+Iceberg V3 table with comprehensive initial-default coverage for all supported primitive
+types (BOOLEAN, INT, BIGINT, FLOAT, DOUBLE, DECIMAL, STRING, DATE, TIMESTAMP, BINARY).
+Created with Spark/Iceberg, then copied from HDFS and modified:
+  1. Initial table: column id (int), inserted (1)
+  2. ALTER TABLE ADD COLUMNS (col_boolean, col_int, col_bigint, col_float, col_double,
+     col_decimal, col_string, col_date, col_timestamp, col_binary)
+  3. Inserted a second row with explicit values for all columns
+  4. Manually added initial-default values to all columns in the metadata.json file.
+This table tests that Impala correctly applies initial-default values for all supported
+primitive types when reading legacy data files. The BINARY column tests rejection of
+binary defaults.
+
+testdata/data/iceberg_test/iceberg_v3/iceberg_v3_row_lineage(_orc):
+Iceberg V3 table created by Spark 4.0.2, see above (iceberg_v3_deletion_vectors).
+sql("create table iceberg_v3_row_lineage (i int) using iceberg options('format-version'='3')").collect()
+sql("create table iceberg_v3_row_lineage_orc (i int) using iceberg options('format-version'='3', 'write.format.default'='orc')").collect()
+The followings are the same for both tables:
+sql("insert into iceberg_v3_row_lineage values(1)").collect()
+sql("insert into iceberg_v3_row_lineage values(2)").collect()
+sql("insert into iceberg_v3_row_lineage values(3)").collect()
+sql("CALL spark_catalog.system.rewrite_data_files('iceberg_v3_row_lineage', options => map('min-input-files', '2'))").show()
+
 arrays_big.parq:
 Generated with RandomNestedDataGenerator.java from the following schema:
 {

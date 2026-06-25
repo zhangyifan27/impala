@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import pytest
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
 from tests.common.skip import SkipIf
@@ -27,6 +26,6 @@ class TestHedgedReads(CustomClusterTestSuite):
       NOTE: We unfortunately cannot force hedged reads on a minicluster, but we enable
       this test to at least make sure that the code path doesn't break."""
   @CustomClusterTestSuite.with_args("--use_hdfs_pread=true")
-  def test_hedged_reads(self, vector):
+  def test_hedged_reads(self):
     QUERY = "select * from tpch_parquet.lineitem limit 100"
     self.client.execute(QUERY)

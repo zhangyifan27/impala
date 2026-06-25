@@ -20,6 +20,7 @@
 #include <boost/lexical_cast.hpp>
 
 #include "common/object-pool.h"
+#include "common/status-serialization.h"
 #include "exec/exec-node.h"
 #include "exec/kudu/kudu-util.h"
 #include "exec/scan-node.h"
@@ -31,6 +32,7 @@
 #include "kudu/util/status.h"
 #include "rpc/rpc-mgr.inline.h"
 #include "rpc/sidecar-util.h"
+#include "runtime/backend-machine-info-aggregator.h"
 #include "runtime/client-cache.h"
 #include "runtime/coordinator-filter-state.h"
 #include "runtime/debug-options.h"
@@ -59,6 +61,10 @@ namespace accumulators = boost::accumulators;
 DECLARE_bool(gen_experimental_profile);
 DECLARE_int32(backend_client_rpc_timeout_ms);
 DECLARE_int64(rpc_max_message_size);
+
+DEFINE_int64(large_execquery_rpc_threshold_bytes, 25 * 1024 * 1024,
+    "(Advanced) Threshold for considering an ExecQueryFInstances RPC to be unusually "
+    "large. Large RPCs trigger additional logging and other diagnostics.");
 
 namespace impala {
 PROFILE_DEFINE_COUNTER(BytesAssigned, STABLE_HIGH, TUnit::BYTES,
@@ -89,6 +95,15 @@ void Coordinator::BackendState::Init(const vector<FragmentStats*>& fragment_stat
   host_profile_ =
       RuntimeProfile::Create(obj_pool, NetworkAddressPBToString(host_), false);
   host_profile_parent->AddChild(host_profile_);
+
+  // Add machine information to per-node profile.
+  DCHECK(backend_exec_params_.has_machine_info());
+  const MachineInfoPB& machine_info = backend_exec_params_.machine_info();
+  host_profile_->AddInfoString("OS Info",
+      BackendMachineInfoAggregator::MachineInfoPBToOsDisplayString(machine_info));
+  host_profile_->AddInfoString("CPU Info",
+      BackendMachineInfoAggregator::MachineInfoPBToCpuConfigString(machine_info));
+
   RuntimeProfile::Counter* admission_slots =
       ADD_COUNTER(host_profile_, "AdmissionSlots", TUnit::UNIT);
   admission_slots->Set(backend_exec_params_.slots_to_use());
@@ -117,7 +132,8 @@ void Coordinator::BackendState::Init(const vector<FragmentStats*>& fragment_stat
 
 void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
     const FilterRoutingTable& filter_routing_table, ExecQueryFInstancesRequestPB* request,
-    TExecPlanFragmentInfo* fragment_info) {
+    TExecPlanFragmentInfo* fragment_info, int64_t* total_scan_ranges) {
+  *total_scan_ranges = 0;
   request->set_coord_state_idx(state_idx_);
   request->set_min_mem_reservation_bytes(
       backend_exec_params_.min_mem_reservation_bytes());
@@ -156,6 +172,10 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
     UniqueIdPBToTUniqueId(params.instance_id(), &instance_ctx.fragment_instance_id);
     instance_ctx.per_fragment_instance_idx = params.per_fragment_instance_idx();
     *instance_ctx_pb->mutable_per_node_scan_ranges() = params.per_node_scan_ranges();
+    // Sum the scan ranges over all the fragments
+    for (const auto& pair : params.per_node_scan_ranges()) {
+      *total_scan_ranges += pair.second.scan_ranges().size();
+    }
     for (const auto& entry : fragment_exec_params.per_exch_num_senders()) {
       instance_ctx.per_exch_num_senders[entry.first] = entry.second;
     }
@@ -170,7 +190,9 @@ void Coordinator::BackendState::SetRpcParams(const DebugOptions& debug_options,
       instance_ctx.__set_debug_options(debug_options.ToThrift());
     }
     int num_backends = fragment_exec_params.num_hosts();
+    int num_instances = fragment_exec_params.instances_size();
     instance_ctx.__set_num_backends(num_backends);
+    instance_ctx.__set_num_instances(num_instances);
 
     if (filter_mode_ == TRuntimeFilterMode::OFF) continue;
 
@@ -250,7 +272,7 @@ void Coordinator::BackendState::ExecCompleteCb(
       goto done;
     }
 
-    Status exec_status = Status(exec_response_.status());
+    Status exec_status = StatusFromProto(exec_response_.status());
     if (!exec_status.ok()) {
       SetExecError(exec_status, exec_status_barrier);
       goto done;
@@ -271,7 +293,8 @@ done:
 void Coordinator::BackendState::ExecAsync(const DebugOptions& debug_options,
     const FilterRoutingTable& filter_routing_table,
     const kudu::Slice& serialized_query_ctx,
-    TypedCountingBarrier<Status>* exec_status_barrier) {
+    TypedCountingBarrier<Status>* exec_status_barrier,
+    Coordinator::ExecQueryRpcStats* execquery_rpc_stats) {
   {
     lock_guard<mutex> l(lock_);
     DCHECK(!exec_done_);
@@ -295,7 +318,9 @@ void Coordinator::BackendState::ExecAsync(const DebugOptions& debug_options,
 
     ExecQueryFInstancesRequestPB request;
     TExecPlanFragmentInfo fragment_info;
-    SetRpcParams(debug_options, filter_routing_table, &request, &fragment_info);
+    int64_t total_scan_ranges;
+    SetRpcParams(debug_options, filter_routing_table, &request, &fragment_info,
+        &total_scan_ranges);
 
     exec_rpc_controller_.set_timeout(
         MonoDelta::FromMilliseconds(FLAGS_backend_client_rpc_timeout_ms));
@@ -309,9 +334,11 @@ void Coordinator::BackendState::ExecAsync(const DebugOptions& debug_options,
     }
 
     int sidecar_idx;
+    int64_t fragment_info_length = 0;
     // TODO: eliminate the extra copy here by using a Slice
     Status sidecar_status =
-        SetFaststringSidecar(fragment_info, &exec_rpc_controller_, &sidecar_idx);
+        SetFaststringSidecar(fragment_info, &exec_rpc_controller_, &sidecar_idx,
+            &fragment_info_length);
     if (UNLIKELY(!sidecar_status.ok())) {
       SetExecError(sidecar_status, exec_status_barrier);
       goto done;
@@ -334,9 +361,58 @@ void Coordinator::BackendState::ExecAsync(const DebugOptions& debug_options,
 
     CopyFilepathToHostsMappingToRequest(&request);
 
-    VLOG_FILE << "making rpc: ExecQueryFInstances"
-              << " host=" << impalad_address() << " query_id=" << PrintId(query_id_);
+    // Three components to the size of the RPC:
+    // 1. serialized_query_ctx.size(): Serialized shared TQueryCtx sent for every message
+    //    to every executor.
+    // 2. fragment_info_length: Serialized TExecPlanFragmentInfo for only this executor
+    // 3. request.ByteSizeLong(): Other fields on ExecQueryFInstancesRequestPB (including
+    //    the scan ranges)
+    // This may be off by a few bytes due to KRPC headers, but it covers the
+    // Impala-specific content.
+    rpc_size_ = request.ByteSizeLong() + serialized_query_ctx.size() +
+        fragment_info_length;
+    if (rpc_size_ >= FLAGS_large_execquery_rpc_threshold_bytes) {
+      // If this exceeds the threshold, we report a warning through the ExecQueryRpcStats
+      // structure. That triggers logging of the shared TQueryCtx part of the
+      // message. It logs more detailed information about the top few messages.
+      // To help diagnosing the backend specific pieces, we need to break down
+      // the size of the different pieces of the message. The number of fragments and
+      // scan ranges can be important contributors to the size, so include that
+      // information as well.
 
+      // Compute the size for the by_node_filepath_to_hosts
+      int64_t filepath_to_host_size = 0;
+      for (const auto& val : request.by_node_filepath_to_hosts()) {
+        filepath_to_host_size += sizeof(val.first);
+        filepath_to_host_size += val.second.ByteSizeLong();
+      }
+
+      stringstream warn;
+      warn << "Destination: " << NetworkAddressPBToString(impalad_address())
+           << " Total size: " << PrettyPrinter::Print(rpc_size_, TUnit::BYTES)
+           << " Backend-specific size: "
+           << PrettyPrinter::Print(rpc_size_ - serialized_query_ctx.size(), TUnit::BYTES)
+           << " TExecPlanFragmentInfo: "
+           << PrettyPrinter::Print(fragment_info_length, TUnit::BYTES)
+           << " ExecQueryFInstancesRequestPB: "
+           << PrettyPrinter::Print(request.ByteSizeLong(), TUnit::BYTES)
+           << " num fragments: " << fragment_info.fragments.size()
+           << " num fragment instances: "
+           << fragment_info.fragment_instance_ctxs.size()
+           << " num scan ranges: " << total_scan_ranges;
+      if (filepath_to_host_size > 0) {
+        warn << " filepath to host map: "
+             << PrettyPrinter::Print(filepath_to_host_size, TUnit::BYTES);
+      }
+      // stringstream::str() returns a copy, so warn.str() is an rvalue reference and
+      // doesn't need std::move().
+      execquery_rpc_stats->ReportRpcSizeWithWarning(rpc_size_, warn.str());
+    } else {
+      execquery_rpc_stats->ReportRpcSize(rpc_size_);
+    }
+    VLOG_FILE << "making rpc: ExecQueryFInstances"
+              << " host=" << impalad_address() << " query_id=" << PrintId(query_id_)
+              << " size=" << PrettyPrinter::Print(rpc_size_, TUnit::BYTES);
     proxy->ExecQueryFInstancesAsync(request, &exec_response_, &exec_rpc_controller_,
         std::bind(&Coordinator::BackendState::ExecCompleteCb, this, exec_status_barrier,
             MonotonicMillis()));
@@ -576,7 +652,7 @@ bool Coordinator::BackendState::ApplyExecStatusReport(
   // status_ has incorporated the status from all fragment instances. If the overall
   // backend status is not OK, but no specific fragment instance reported an error, then
   // this is a general backend error. Incorporate the general error into status_.
-  Status overall_status(backend_exec_status.overall_status());
+  Status overall_status = StatusFromProto(backend_exec_status.overall_status());
   if (!overall_status.ok() && (status_.ok() || status_.IsCancelled())) {
     status_ = overall_status;
     if (backend_exec_status.has_fragment_instance_id()) {
@@ -735,7 +811,7 @@ Coordinator::BackendState::CancelResult Coordinator::BackendState::Cancel(
           Substitute("CancelQueryFInstances rpc failed: $0", rpc_status.msg().msg()));
       goto done;
     }
-    Status cancel_status = Status(response.status());
+    Status cancel_status = StatusFromProto(response.status());
     if (!cancel_status.ok()) {
       status_.MergeStatus(cancel_status);
       result.became_done = true;
@@ -874,6 +950,9 @@ void Coordinator::BackendState::InstanceStats::Update(
     }
     DCHECK(exec_summary_entry.has_local_time_ns());
     instance_stats.__set_latency_ns(exec_summary_entry.local_time_ns());
+    if (exec_summary_entry.has_last_batch_returned()) {
+      instance_stats.__set_last_batch_returned(exec_summary_entry.last_batch_returned());
+    }
     node_exec_summary.__isset.exec_stats = true;
   }
 
@@ -1010,6 +1089,7 @@ void Coordinator::BackendState::ToJson(Value* value, Document* document) {
   value->AddMember("host", val, document->GetAllocator());
 
   value->AddMember("rpc_latency", rpc_latency(), document->GetAllocator());
+  value->AddMember("rpc_size", rpc_size(), document->GetAllocator());
   value->AddMember("time_since_last_heard_from", MonotonicMillis() - last_report_time_ms_,
       document->GetAllocator());
 

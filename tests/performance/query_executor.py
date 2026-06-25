@@ -29,7 +29,6 @@
 # executor.run()
 # result = executor.result
 
-from __future__ import absolute_import, division, print_function
 import logging
 import os
 import re
@@ -41,17 +40,17 @@ LOG = logging.getLogger('query_executor')
 LOG.setLevel(level=logging.INFO)
 
 # Globals.
-hive_result_regex = 'Time taken: (\d*).(\d*) seconds'
+hive_result_regex = r'Time taken: (\d*).(\d*) seconds'
 # Match any CRUD statement that can follow EXPLAIN.
 # The statement may begin with SQL line comments starting with --
 COMMENT_LINES_REGEX = r'(?:\s*--.*\n)*'
 DDL_CRUD_PATTERN = \
-  re.compile(COMMENT_LINES_REGEX +
-      r'\s*((CREATE|DELETE|INSERT|SELECT|UPDATE|UPSERT|WITH)\s|VALUES\s*\()',
+  re.compile(COMMENT_LINES_REGEX
+      + r'\s*((CREATE|DELETE|INSERT|SELECT|UPDATE|UPSERT|WITH)\s|VALUES\s*\()',
       re.IGNORECASE)
 
 
-## TODO: Split executors into their own modules.
+# TODO: Split executors into their own modules.
 class QueryExecConfig(object):
   """Base Class for Execution Configs
 
@@ -106,6 +105,7 @@ class JdbcQueryExecConfig(ImpalaQueryExecConfig):
     return JdbcQueryExecConfig.JDBC_CLIENT_PATH + ' -i "%s" -t %s' % (self._impalad,
                                                                       self.transport)
 
+
 class ImpalaHS2QueryConfig(ImpalaQueryExecConfig):
   def __init__(self, use_kerberos=False, impalad="localhost:21050", plugin_runner=None):
     super(ImpalaHS2QueryConfig, self).__init__(plugin_runner=plugin_runner,
@@ -117,11 +117,11 @@ class ImpalaHS2QueryConfig(ImpalaQueryExecConfig):
 class HiveHS2QueryConfig(QueryExecConfig):
   def __init__(self,
       plugin_runner=None,
-      exec_options = None,
+      exec_options=None,
       use_kerberos=False,
       user=None,
       hiveserver='localhost'):
-    super(HiveHS2QueryConfig, self).__init__()
+    super(HiveHS2QueryConfig, self).__init__(plugin_runner=plugin_runner)
     self.exec_options = dict()
     self._build_options(exec_options)
     self.use_kerberos = use_kerberos
@@ -142,46 +142,6 @@ class HiveHS2QueryConfig(QueryExecConfig):
         key, value = option.split(':')
         # The keys in HiveService QueryOptions are lower case.
         self.exec_options[key.lower()] = value
-
-class BeeswaxQueryExecConfig(ImpalaQueryExecConfig):
-  """Impala query execution config for beeswax
-
-  Args:
-    use_kerberos (boolean)
-    exec_options (str): String formatted as "opt1:val1;opt2:val2"
-    impalad (str): address of impalad <host>:<port>
-    plugin_runner (?): ?
-
-  Attributes:
-    use_kerberos (boolean)
-    exec_options (dict str -> str): execution options
-  """
-
-  def __init__(self, use_kerberos=False, exec_options=None, impalad='localhost:21000',
-               plugin_runner=None, user=None, password=None, use_ssl=False):
-    super(BeeswaxQueryExecConfig, self).__init__(plugin_runner=plugin_runner,
-        impalad=impalad)
-    self.use_kerberos = use_kerberos
-    self.exec_options = dict()
-    self._build_options(exec_options)
-    self.user = user
-    self.password = password
-    self.use_ssl = use_ssl
-
-  def _build_options(self, exec_options):
-    """Read the exec_options into self.exec_options
-
-    Args:
-      exec_options (str): String formatted as "opt1:val1;opt2:val2"
-    """
-
-    if exec_options:
-      # exec_options are seperated by ; on the command line
-      options = exec_options.split(';')
-      for option in options:
-        key, value = option.split(':')
-        # The keys in ImpalaService QueryOptions are upper case.
-        self.exec_options[key.upper()] = value
 
 
 class QueryExecutor(object):

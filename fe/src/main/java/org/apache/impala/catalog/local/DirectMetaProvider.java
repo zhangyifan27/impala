@@ -25,7 +25,6 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.NotImplementedException;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.metastore.api.ColumnStatisticsObj;
 import org.apache.hadoop.hive.metastore.api.Database;
 import org.apache.hadoop.hive.metastore.api.ForeignKeysRequest;
@@ -43,6 +42,7 @@ import org.apache.impala.catalog.FileMetadataLoader;
 import org.apache.impala.catalog.Function;
 import org.apache.impala.catalog.HdfsCachePool;
 import org.apache.impala.catalog.HdfsPartitionLocationCompressor;
+import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.HdfsStorageDescriptor;
 import org.apache.impala.catalog.MetaStoreClientPool;
 import org.apache.impala.catalog.MetaStoreClientPool.MetaStoreClient;
@@ -559,6 +559,11 @@ class DirectMetaProvider implements MetaProvider {
     public long getLoadedTimeMs() {
       return 0;
     }
+
+    @Override
+    public boolean isIceberg() {
+      return IcebergTable.isIcebergTable(msTable_);
+    }
   }
 
   @Override
@@ -593,5 +598,12 @@ class DirectMetaProvider implements MetaProvider {
       TableParams param, Table msTable) throws TException {
     throw new NotImplementedException(
         "loadIcebergApiTable() is not implemented for DirectMetaProvider");
+  }
+
+  @Override
+  public MetaProvider.CachedIcebergFiles
+      loadIcebergContentFileStore(final TableMetaRef table) throws TException {
+    throw new NotImplementedException(
+        "loadIcebergContentFileStore() is not implemented for DirectMetaProvider");
   }
 }

@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.test_dimensions import (
   create_single_exec_option_dimension,
@@ -25,14 +24,6 @@ from tests.util.filesystem_utils import get_fs_path
 
 
 class TestTestcaseBuilder(ImpalaTestSuite):
-
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestTestcaseBuilder, cls).add_test_dimensions()
-    # This test only needs to be run once.
-    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.ImpalaTestMatrix.add_dimension(
-      create_uncompressed_text_dimension(cls.get_workload()))
 
   def test_query_without_from(self):
     self._test_export_and_import(0, 0, 0, "SELECT 5 * 20")

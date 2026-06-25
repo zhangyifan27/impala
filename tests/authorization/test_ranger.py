@@ -17,7 +17,6 @@
 #
 # Client tests for SQL statement authorization
 
-from __future__ import absolute_import, division, print_function
 from getpass import getuser
 import grp
 import json
@@ -27,14 +26,13 @@ from subprocess import check_call
 import tempfile
 from time import sleep
 
-from builtins import map, range
 import pytest
 import requests
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite, HIVE_CONF_DIR
 from tests.common.file_utils import copy_files_to_hdfs_dir
 from tests.common.iceberg_rest_server import IcebergRestServer
-from tests.common.skip import SkipIf, SkipIfFS, SkipIfHive2
+from tests.common.skip import SkipIf, SkipIfFS, SkipIfHive2, SkipIfCalcite
 from tests.common.test_dimensions import (
     create_client_protocol_dimension,
     create_orc_dimension,
@@ -56,16 +54,16 @@ ERROR_REVOKE = "User doesn't have necessary permission to revoke access"
 RANGER_AUTH = ("admin", "admin")
 RANGER_HOST = "http://localhost:6080"
 REST_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
-LEGACY_CATALOG_IMPALAD_ARGS = "--server-name=server1 --ranger_service_type=hive " \
+LEGACY_CATALOG_IMPALAD_ARGS = "--server_name=server1 --ranger_service_type=hive " \
     "--ranger_app_id=impala --authorization_provider=ranger " \
     "--use_local_catalog=false"
-LEGACY_CATALOG_CATALOGD_ARGS = "--server-name=server1 --ranger_service_type=hive " \
+LEGACY_CATALOG_CATALOGD_ARGS = "--server_name=server1 --ranger_service_type=hive " \
     "--ranger_app_id=impala --authorization_provider=ranger " \
     "--catalog_topic_mode=full"
 
-IMPALAD_ARGS = "--server-name=server1 --ranger_service_type=hive " \
+IMPALAD_ARGS = "--server_name=server1 --ranger_service_type=hive " \
     "--ranger_app_id=impala --authorization_provider=ranger --use_local_catalog=true"
-CATALOGD_ARGS = "--server-name=server1 --ranger_service_type=hive " \
+CATALOGD_ARGS = "--server_name=server1 --ranger_service_type=hive " \
     "--ranger_app_id=impala --authorization_provider=ranger --catalog_topic_mode=minimal"
 
 LOG = logging.getLogger('impala_test_suite')
@@ -1314,11 +1312,18 @@ class TestRanger(CustomClusterTestSuite):
       table_loaded_log = "Loaded metadata for: functional.alltypestiny"
       self.assert_catalogd_log_contains("INFO", table_loaded_log, expected_count=0)
 
-      # Run a query to trigger metadata loading on the table
+      # Run REFRESH PARTITION to trigger metadata loading on the table. Use sync_ddl=true
+      # to make sure coordinators have processed the statestore update.
+      # TODO: use a single DESCRIBE when IMPALA-14856 is resolved.
       self.execute_query_expect_success(
-        non_admin_client, "describe functional.alltypestiny")
+          non_admin_client,
+          "refresh functional.alltypestiny partition(year=2009, month=1)",
+          query_options={'sync_ddl': True})
       # Verify catalogd loads metadata of this table
       self.assert_catalogd_log_contains("INFO", table_loaded_log, expected_count=1)
+      # Run DESCRIBE to make sure the metadata is loaded in coordinator side.
+      self.execute_query_expect_success(
+          non_admin_client, "describe functional.alltypestiny")
 
       # INVALIDATE METADATA <table> is allowed since 'user' is detected as the owner.
       self.execute_query_expect_success(
@@ -1724,8 +1729,10 @@ class TestRanger(CustomClusterTestSuite):
     grantee_user = "non_owner"
     with self.create_impala_client(user=ADMIN) as admin_client, \
       self.create_impala_client(user=grantee_user) as non_owner_client:
-      # Set the query option of 'use_calcite_planner' to 1 to use the Calcite planner.
-      non_owner_client.set_configuration({"use_calcite_planner": 1})
+      # Set the query option planner to CALCITE and ensure there is no fallback to
+      # the original planner
+      non_owner_client.set_configuration({"planner": "CALCITE"})
+      non_owner_client.set_configuration({"fallback_planner": "CALCITE"})
       unique_database = unique_name + "_db"
       unique_table = unique_name + "_tbl"
       test_select_query = "select * from {0}.{1}".format(unique_database, unique_table)
@@ -1784,8 +1791,10 @@ class TestRanger(CustomClusterTestSuite):
     with self.create_impala_client(user=ADMIN) as admin_client, \
         self.create_impala_client(user=grantee_user) as non_owner_client:
       if use_calcite_planner is True:
-        # Set the query option of 'use_calcite_planner' to 1 to use the Calcite planner.
-        non_owner_client.set_configuration({"use_calcite_planner": 1})
+        # Set the query option planner to CALCITE and ensure there is no fallback to
+        # the original planner
+        non_owner_client.set_configuration({"planner": "CALCITE"})
+        non_owner_client.set_configuration({"fallback_planner": "CALCITE"})
       test_select_query = "select * from {0}".format(v2_name)
       select_error_prefix = "User '{0}' does not have privileges to execute " \
           "'SELECT' on:".format(grantee_user)
@@ -1923,7 +1932,7 @@ class TestRanger(CustomClusterTestSuite):
     grantee_user = "non_owner"
     with self.create_impala_client(user=ADMIN) as admin_client, \
         self.create_impala_client(user=grantee_user) as non_owner_client:
-      non_owner_client.set_configuration({"use_calcite_planner": 1})
+      non_owner_client.set_configuration({"planner": "CALCITE"})
       database = "functional"
       table_1 = "alltypes"
       table_2 = "alltypestiny"
@@ -2322,6 +2331,14 @@ class TestRangerIndependent(TestRanger):
     with self.create_impala_client(user=ADMIN) as admin_client:
       TestRanger._test_grant_revoke_with_role(self, 'GROUP', vector, admin_client)
       TestRanger._test_grant_revoke_with_role(self, 'USER', vector, admin_client)
+
+  @CustomClusterTestSuite.with_args(
+    impalad_args="{0} {1}".format(IMPALAD_ARGS,
+                                  "--use_customized_user_groups_mapper_for_ranger"),
+    catalogd_args="{0} {1}".format(CATALOGD_ARGS,
+                                   "--use_customized_user_groups_mapper_for_ranger"))
+  def test_show_current_groups(self, vector):
+    self.run_test_case('QueryTest/show_current_groups', vector)
 
   @CustomClusterTestSuite.with_args(
     impalad_args=IMPALAD_ARGS, catalogd_args=CATALOGD_ARGS)
@@ -3208,6 +3225,8 @@ class TestRangerLocalCatalog(TestRanger):
       while policy_names:
         TestRanger._remove_policy(policy_names.pop())
 
+  #IMPALA-14295: support row_filtering in Calcite planner
+  @SkipIfCalcite.row_filtering_not_supported
   @pytest.mark.execute_serially
   def test_row_filtering(self, vector, unique_name):
     user = getuser()
@@ -3540,6 +3559,52 @@ class TestRangerLocalCatalog(TestRanger):
         TestRanger._remove_policy(unique_name)
     finally:
       admin_client.execute("drop database if exists {0} cascade".format(unique_database))
+
+  @pytest.mark.execute_serially
+  def test_iceberg_v3_column_masking(self, vector, unique_name):
+    """Test column masking on Iceberg V3 virtual columns (_row_id, _file_row_id,
+    _last_updated_sequence_number, _file_last_updated_sequence_number)."""
+    user = getuser()
+    admin_client = self.create_impala_client(user=ADMIN)
+    unique_database = unique_name + "_db"
+    short_table_name = "ice_v3"
+    tbl_name = unique_database + "." + short_table_name
+
+    policy_cnt = 0
+    try:
+      admin_client.execute("drop database if exists {0} cascade"
+                           .format(unique_database))
+      admin_client.execute("create database {0}".format(unique_database))
+      admin_client.execute(
+          "create table {0} (i int) stored by iceberg "
+          "tblproperties ('format-version'='3')".format(tbl_name))
+      admin_client.execute("insert into {0} values (1), (2), (3)".format(tbl_name))
+      admin_client.execute(
+          "insert into {0} select cast(l_orderkey as INT) "
+          "from tpch.lineitem where l_orderkey > 6".format(tbl_name))
+      admin_client.execute("insert into {0} values (4), (5), (6)".format(tbl_name))
+      admin_client.execute(
+          "optimize table {0} (file_size_threshold_mb=1)".format(tbl_name))
+      admin_client.execute("grant select on database {0} to user {1} "
+                           .format(unique_database, user))
+
+      # Add column masking policies that produce the negative values of virtual columns.
+      for col in ["_row_id", "_file_row_id", "_last_updated_sequence_number",
+                  "_file_last_updated_sequence_number"]:
+        TestRanger._add_column_masking_policy(
+            unique_name + str(policy_cnt), user, unique_database, short_table_name,
+            col, "CUSTOM", "-{col}")
+        policy_cnt += 1
+      self.execute_query_expect_success(admin_client, "refresh authorization")
+      self.run_test_case("QueryTest/ranger_iceberg_v3_column_masking", vector,
+                         test_file_vars={'$UNIQUE_DB': unique_database})
+    finally:
+      admin_client.execute("revoke select on database {0} from user {1}"
+                            .format(unique_database, user))
+      admin_client.execute("drop database if exists {0} cascade"
+                           .format(unique_database))
+      for i in range(policy_cnt):
+        TestRanger._remove_policy(unique_name + str(i))
 
   @pytest.mark.execute_serially
   def test_convert_table_to_iceberg(self, unique_name):
@@ -4032,8 +4097,10 @@ class TestRangerWithCalcite(TestRanger):
     """
     with self.create_impala_client(user=ADMIN) as admin_client, \
         self.create_impala_client(user=NON_OWNER) as non_owner_client:
-      # Set the query option of 'use_calcite_planner' to 1 to use the Calcite planner.
-      non_owner_client.set_configuration({"use_calcite_planner": 1})
+      # Set the query option planner to CALCITE and ensure there is no fallback to
+      # the original planner
+      non_owner_client.set_configuration({"planner": "CALCITE",
+          "fallback_planner": "CALCITE"})
       database = "functional"
       table_1 = database + "." + "alltypes"
       table_2 = database + "." "alltypestiny"
@@ -4069,8 +4136,9 @@ class TestRangerWithCalcite(TestRanger):
         non_owner_client.execute(test_query_3)
         non_owner_client.execute(test_query_4)
 
-        # Set the query option of 'use_calcite_planner' to 0 to use the classic frontend.
-        non_owner_client.set_configuration({"use_calcite_planner": 0})
+        # Set the query option planner back to ORIGINAL
+        non_owner_client.set_configuration({"planner": "ORIGINAL",
+            "fallback_planner": "ORIGINAL"})
         # Impala's classic frontend supports 'test_query_3'.
         non_owner_client.execute(test_query_3)
         # Impala's classic frontend could not support 'test_query_4'.

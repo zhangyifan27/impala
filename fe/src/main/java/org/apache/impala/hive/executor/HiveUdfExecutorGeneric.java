@@ -26,7 +26,8 @@ import org.apache.hadoop.hive.ql.udf.generic.GenericUDF.DeferredObject;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.thrift.THiveUdfExecutorCtorParams;
 import org.apache.impala.util.UnsafeUtil;
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 
@@ -37,7 +38,7 @@ import com.google.common.base.Preconditions;
  * See the comments in be/src/exprs/hive-udf-call.h for more details.
  */
 public class HiveUdfExecutorGeneric extends HiveUdfExecutor {
-  private static final Logger LOG = Logger.getLogger(HiveUdfExecutorGeneric.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HiveUdfExecutorGeneric.class);
 
   private GenericUDF genericUDF_;
 
@@ -56,9 +57,10 @@ public class HiveUdfExecutorGeneric extends HiveUdfExecutor {
    * the backend.
    */
   public HiveUdfExecutorGeneric(THiveUdfExecutorCtorParams request,
-      HiveGenericJavaFunction hiveJavaFn) throws ImpalaRuntimeException {
+      HiveGenericJavaFunction hiveJavaFn, HiveUdfInputHandler inputHandler)
+      throws ImpalaRuntimeException {
     super(request, JavaUdfDataType.getType(hiveJavaFn.getReturnObjectInspector()),
-        JavaUdfDataType.getTypes(hiveJavaFn.getParameterTypes()));
+        inputHandler);
     genericUDF_ = hiveJavaFn.getGenericUDFInstance();
     deferredParameters_ = createDeferredObjects();
     deferredNullParameter_ = new DeferredJavaObject(null);
@@ -73,9 +75,10 @@ public class HiveUdfExecutorGeneric extends HiveUdfExecutor {
    * Evaluates the UDF with 'args' as the input to the UDF.
    */
   @Override
-  protected Object evaluateDerived(JavaUdfDataType[] argTypes,
-      long inputNullsPtr, Object[] inputObjectArgs) throws ImpalaRuntimeException {
+  protected Object evaluateDerived(Object[] inputObjectArgs)
+      throws ImpalaRuntimeException {
     try {
+      long inputNullsPtr = inputHandler_.getInputNullsPtr();
       for (int i = 0; i < runtimeDeferredParameters_.length; ++i) {
         if (UnsafeUtil.UNSAFE.getByte(inputNullsPtr + i) == 0) {
           runtimeDeferredParameters_[i] = deferredParameters_[i];

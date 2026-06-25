@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import map, range
 import pytest
 import random
 import time
@@ -39,13 +37,6 @@ class TestInsertStress(ImpalaTestSuite):
   @classmethod
   def setup_class(cls):
     super(TestInsertStress, cls).setup_class()
-
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestInsertStress, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_constraint(
-        lambda v: (v.get_value('table_format').file_format == 'parquet' and
-                   v.get_value('table_format').compression_codec == 'snappy'))
 
   def _impala_role_concurrent_writer(self, tbl_name, wid, num_inserts, counter):
     """Writes ascending numbers up to 'num_inserts' into column 'i'. To column 'wid' it

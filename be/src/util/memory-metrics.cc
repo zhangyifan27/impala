@@ -24,6 +24,7 @@
 #include "runtime/bufferpool/reservation-tracker.h"
 #include "runtime/mem-tracker.h"
 #include "util/jni-util.h"
+#include "util/malloc-util.h"
 #include "util/mem-info.h"
 #include "util/process-state-info.h"
 #include "util/time.h"
@@ -52,14 +53,6 @@ StringProperty* AggregateMemoryMetrics::THP_ENABLED = nullptr;
 StringProperty* AggregateMemoryMetrics::THP_DEFRAG = nullptr;
 StringProperty* AggregateMemoryMetrics::THP_KHUGEPAGED_DEFRAG = nullptr;
 
-TcmallocMetric* TcmallocMetric::BYTES_IN_USE = nullptr;
-TcmallocMetric* TcmallocMetric::PAGEHEAP_FREE_BYTES = nullptr;
-TcmallocMetric* TcmallocMetric::TOTAL_BYTES_RESERVED = nullptr;
-TcmallocMetric* TcmallocMetric::PAGEHEAP_UNMAPPED_BYTES = nullptr;
-TcmallocMetric::PhysicalBytesMetric* TcmallocMetric::PHYSICAL_BYTES_RESERVED = nullptr;
-
-SanitizerMallocMetric* SanitizerMallocMetric::BYTES_ALLOCATED = nullptr;
-
 bool JvmMemoryMetric::initialized_ = false;
 JvmMemoryMetric* JvmMemoryMetric::HEAP_MAX_USAGE = nullptr;
 JvmMemoryMetric* JvmMemoryMetric::NON_HEAP_COMMITTED = nullptr;
@@ -80,11 +73,6 @@ BufferPoolMetric* BufferPoolMetric::FREE_BUFFER_BYTES = nullptr;
 BufferPoolMetric* BufferPoolMetric::CLEAN_PAGES_LIMIT = nullptr;
 BufferPoolMetric* BufferPoolMetric::NUM_CLEAN_PAGES = nullptr;
 BufferPoolMetric* BufferPoolMetric::CLEAN_PAGE_BYTES = nullptr;
-
-TcmallocMetric* TcmallocMetric::CreateAndRegister(
-    MetricGroup* metrics, const string& key, const string& tcmalloc_var) {
-  return metrics->RegisterMetric(new TcmallocMetric(MetricDefs::Get(key), tcmalloc_var));
-}
 
 Status impala::RegisterMemoryMetrics(MetricGroup* metrics, bool register_jvm_metrics,
     ReservationTracker* global_reservations, BufferPool* buffer_pool) {
@@ -109,33 +97,9 @@ Status impala::RegisterMemoryMetrics(MetricGroup* metrics, bool register_jvm_met
       used_metrics.push_back(JvmMemoryMetric::NON_HEAP_COMMITTED);
     }
   }
-#if defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER)
-  SanitizerMallocMetric::BYTES_ALLOCATED = metrics->RegisterMetric(
-      new SanitizerMallocMetric(MetricDefs::Get("sanitizer-total-bytes-allocated")));
-  used_metrics.push_back(SanitizerMallocMetric::BYTES_ALLOCATED);
-#else
-  MetricGroup* tcmalloc_metrics = metrics->GetOrCreateChildGroup("tcmalloc");
-  // We rely on TCMalloc for our global memory metrics, so skip setting them up
-  // if we're not using TCMalloc.
-  TcmallocMetric::BYTES_IN_USE = TcmallocMetric::CreateAndRegister(
-      tcmalloc_metrics, "tcmalloc.bytes-in-use", "generic.current_allocated_bytes");
-
-  TcmallocMetric::TOTAL_BYTES_RESERVED = TcmallocMetric::CreateAndRegister(
-      tcmalloc_metrics, "tcmalloc.total-bytes-reserved", "generic.heap_size");
-
-  TcmallocMetric::PAGEHEAP_FREE_BYTES = TcmallocMetric::CreateAndRegister(
-      tcmalloc_metrics, "tcmalloc.pageheap-free-bytes", "tcmalloc.pageheap_free_bytes");
-
-  TcmallocMetric::PAGEHEAP_UNMAPPED_BYTES =
-      TcmallocMetric::CreateAndRegister(tcmalloc_metrics,
-          "tcmalloc.pageheap-unmapped-bytes", "tcmalloc.pageheap_unmapped_bytes");
-
-  TcmallocMetric::PHYSICAL_BYTES_RESERVED =
-      tcmalloc_metrics->RegisterMetric(new TcmallocMetric::PhysicalBytesMetric(
-          MetricDefs::Get("tcmalloc.physical-bytes-reserved")));
-
-  used_metrics.push_back(TcmallocMetric::PHYSICAL_BYTES_RESERVED);
-#endif
+  RETURN_IF_ERROR(MallocUtil::GetInstance()->RegisterMemoryMetrics(metrics));
+  used_metrics.push_back(MallocUtil::GetInstance()->GetUsedBytesMetric(
+      /*include_overhead*/ true));
   MetricGroup* aggregate_metrics = metrics->GetOrCreateChildGroup("memory");
   AggregateMemoryMetrics::TOTAL_USED = aggregate_metrics->RegisterMetric(
       new SumGauge(MetricDefs::Get("memory.total-used"), used_metrics));

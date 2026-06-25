@@ -153,7 +153,6 @@ class ExecEnv {
     return frontend_.get();
   }
   RequestPoolService* request_pool_service() { return request_pool_service_.get(); }
-  CallableThreadPool* rpc_pool() { return async_rpc_pool_.get(); }
   QueryExecMgr* query_exec_mgr() { return query_exec_mgr_.get(); }
   RpcMgr* rpc_mgr() const { return rpc_mgr_.get(); }
   PoolMemTrackerRegistry* pool_mem_trackers() { return pool_mem_trackers_.get(); }
@@ -261,7 +260,6 @@ class ExecEnv {
   boost::scoped_ptr<RequestPoolService> request_pool_service_;
   boost::scoped_ptr<Frontend> frontend_;
 
-  boost::scoped_ptr<CallableThreadPool> async_rpc_pool_;
   boost::scoped_ptr<QueryExecMgr> query_exec_mgr_;
   boost::scoped_ptr<RpcMgr> rpc_mgr_;
   boost::scoped_ptr<ControlService> control_svc_;
@@ -359,13 +357,6 @@ class ExecEnv {
 
   /// Initialize ExecEnv based on Hadoop config from frontend.
   Status InitHadoopConfig();
-
-  /// Set tcmalloc's aggressive_memory_decommit=1. This needs to be called before
-  /// initializing the buffer pool, because the buffer pool asserts that this
-  /// property is set and newer versions of tcmalloc do not set it by default.
-  /// InitBufferPool() calls this automatically, so this is only used directly by
-  /// TestEnv.
-  void InitTcMallocAggressiveDecommit();
 
   /// Initialise 'buffer_pool_' and 'buffer_reservation_' with given capacity.
   void InitBufferPool(int64_t min_page_len, int64_t capacity, int64_t clean_pages_limit);

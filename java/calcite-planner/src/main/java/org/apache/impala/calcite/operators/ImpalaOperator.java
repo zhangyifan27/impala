@@ -17,7 +17,6 @@
 
 package org.apache.impala.calcite.operators;
 
-import com.google.common.base.Preconditions;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.sql.SqlCallBinding;
 import org.apache.calcite.sql.SqlFunction;
@@ -26,6 +25,7 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.SqlSyntax;
+import org.apache.impala.analysis.FunctionCallExpr;
 
 /**
  * ImpalaOperator is a custom Calcite operator that handles all generic functions
@@ -35,9 +35,13 @@ import org.apache.calcite.sql.SqlSyntax;
  */
 public class ImpalaOperator extends SqlFunction {
 
+  public final boolean isDeterministic_;
+
   public ImpalaOperator(String name) {
     super(name.toUpperCase(), SqlKind.OTHER, null, null, null,
         SqlFunctionCategory.USER_DEFINED_FUNCTION);
+    isDeterministic_ =
+        !FunctionCallExpr.NON_DETERMINISTIC_FNS.contains(name.toLowerCase());
   }
 
   @Override
@@ -68,5 +72,10 @@ public class ImpalaOperator extends SqlFunction {
   @Override
   public SqlSyntax getSyntax() {
     return SqlSyntax.FUNCTION;
+  }
+
+  @Override
+  public boolean isDeterministic() {
+    return isDeterministic_;
   }
 }

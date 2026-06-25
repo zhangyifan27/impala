@@ -811,6 +811,21 @@ struct TQueryOptions {
 
   // See comment in ImpalaService.thrift
   199: optional i32 show_create_table_partition_limit = 1000
+
+  // See comment in ImpalaService.thrift
+  200: optional PlanNodes.TPlannerType planner = TPlannerType.ORIGINAL
+
+  // See comment in ImpalaService.thrift
+  201: optional PlanNodes.TPlannerType fallback_planner = TPlannerType.ORIGINAL
+
+  // See comment in ImpalaService.thrift
+  202: optional bool enable_explain_calcite = false;
+
+  // See comment in ImpalaService.thrift
+  203: optional bool use_hbo_stats = false
+
+  // See comment in ImpalaService.thrift
+  204: optional bool store_hbo_stats = false
 }
 
 // Impala currently has three types of sessions: Beeswax, HiveServer2 and external

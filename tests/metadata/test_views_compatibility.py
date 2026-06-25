@@ -15,14 +15,13 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import pprint
 import pytest
 import shlex
 
 from tests.common.environ import HIVE_MAJOR_VERSION
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIfFS
+from tests.common.skip import SkipIfExploration, SkipIfFS
 from tests.common.test_dimensions import create_uncompressed_text_dimension
 from tests.common.test_vector import ImpalaTestDimension
 from tests.util.test_file_parser import QueryTestSectionReader
@@ -52,6 +51,7 @@ VALID_ENGINES = [HIVE, IMPALA]
 
 # Missing Coverage: Views created by Hive and Impala being visible and queryable by each
 # other on non hdfs storage.
+@SkipIfExploration.is_not_exhaustive()
 @SkipIfFS.hive
 class TestViewCompatibility(ImpalaTestSuite):
   VALID_SECTION_NAMES = ["CREATE_VIEW", "CREATE_VIEW_RESULTS",
@@ -60,9 +60,6 @@ class TestViewCompatibility(ImpalaTestSuite):
   @classmethod
   def add_test_dimensions(cls):
     super(TestViewCompatibility, cls).add_test_dimensions()
-
-    if cls.exploration_strategy() != 'exhaustive':
-      pytest.skip("Should only run in exhaustive due to long execution time.")
 
     # don't use any exec options, running exactly once is fine
     cls.ImpalaTestMatrix.clear_dimension('exec_option')

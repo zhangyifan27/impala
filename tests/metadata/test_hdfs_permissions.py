@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIfFS, SkipIfLocal, SkipIfCatalogV2
 from tests.common.test_dimensions import (
@@ -31,31 +30,27 @@ TBL_LOC = '%s/%s' % (WAREHOUSE, TEST_TBL)
 @SkipIfFS.hdfs_acls
 @SkipIfLocal.hdfs_client
 class TestHdfsPermissions(ImpalaTestSuite):
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestHdfsPermissions, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.ImpalaTestMatrix.add_dimension(
-        create_uncompressed_text_dimension(cls.get_workload()))
 
   def setup_method(self, method):
+    super().setup_method(method)
     self._cleanup()
 
   def teardown_method(self, method):
+    super().teardown_method(method)
     self._cleanup()
 
   def _cleanup(self):
     self.client.execute('drop table if exists %s' % TEST_TBL)
-    self.hdfs_client.delete_file_dir('test-warehouse/%s' % TEST_TBL, recursive=True)
+    self.hdfs_client.delete_file_dir('/test-warehouse/%s' % TEST_TBL, recursive=True)
 
   @SkipIfCatalogV2.impala_7539()
-  def test_insert_into_read_only_table(self, vector):
+  def test_insert_into_read_only_table(self):
     permission = 444
     if IS_ISILON:
       # In Isilon OneFS 8.0, a change was introduced that requires this. See IMPALA-3698.
       permission = 544
     # Create a directory that is read-only
-    self.hdfs_client.make_dir('test-warehouse/%s' % TEST_TBL, permission=permission)
+    self.hdfs_client.make_dir('/test-warehouse/%s' % TEST_TBL, permission=permission)
     self.client.execute("create external table %s (i int) location '%s'"
         % (TEST_TBL, TBL_LOC))
     try:
@@ -68,8 +63,8 @@ class TestHdfsPermissions(ImpalaTestSuite):
     assert self.execute_scalar('select count(*) from %s' % TEST_TBL) == "0"
 
     # Now re-create the directory with write privileges.
-    self.hdfs_client.delete_file_dir('test-warehouse/%s' % TEST_TBL, recursive=True)
-    self.hdfs_client.make_dir('test-warehouse/%s' % TEST_TBL, permission=777)
+    self.hdfs_client.delete_file_dir('/test-warehouse/%s' % TEST_TBL, recursive=True)
+    self.hdfs_client.make_dir('/test-warehouse/%s' % TEST_TBL, permission=777)
 
     self.client.execute('refresh  %s' % TEST_TBL)
     self.client.execute('insert into table %s select 1' % TEST_TBL)

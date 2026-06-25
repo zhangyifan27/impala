@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from tests.common.environ import ImpalaTestClusterFlagsDetector
 from tests.common.file_utils import grep_dir
 from tests.common.skip import SkipIfBuildType, SkipIfCatalogV2
@@ -37,6 +36,7 @@ import os
 import pytest
 import re
 import requests
+import time
 
 LOG = logging.getLogger(__name__)
 
@@ -62,6 +62,7 @@ class TestWebPage(ImpalaTestSuite):
   BACKENDS_URL = "http://localhost:{0}/backends"
   PROMETHEUS_METRICS_URL = "http://localhost:{0}/metrics_prometheus"
   QUERIES_URL = "http://localhost:{0}/queries"
+  QUERY_PLAN = "http://localhost:{0}/query_plan"
   HEALTHZ_URL = "http://localhost:{0}/healthz"
   EVENT_PROCESSOR_URL = "http://localhost:{0}/events"
   HADOOP_VARZ_URL = "http://localhost:{0}/hadoop-varz"
@@ -172,7 +173,7 @@ class TestWebPage(ImpalaTestSuite):
     query_handle = self.client.execute_async(query)
     try:
       self.client.wait_for_impala_state(query_handle, RUNNING, 1000)
-      memz_breakdown = self.get_debug_page(self.MEMZ_URL)['detailed']
+      memz_breakdown = self._get_debug_page(self.MEMZ_URL)['detailed']
       finstance_re = re.compile("Fragment [0-9a-f]{16}:[0-9a-f]{16}")
       assert finstance_re.search(memz_breakdown), memz_breakdown
     finally:
@@ -319,7 +320,7 @@ class TestWebPage(ImpalaTestSuite):
       assert 'Content-Security-Policy' in response.headers, "CSP header missing"
     return responses
 
-  def get_debug_page(self, page_url, port=25000):
+  def _get_debug_page(self, page_url, port=25000):
     """Returns the content of the debug page 'page_url' as json."""
     responses = self.get_and_check_status(page_url + "?json", ports_to_test=[port])
     assert len(responses) == 1
@@ -723,7 +724,7 @@ class TestWebPage(ImpalaTestSuite):
     # chars + "..."
     expected_result = "select \"{0}...".format("x " * 121)
     check_if_contains = False
-    (_, response_json) = self.__run_query_and_get_debug_page(
+    (_, response_json) = self.run_query_and_get_debug_page(
       query, self.QUERIES_URL, expected_state=FINISHED)
     # Search the json for the expected value.
     # The query can be in in_flight_queries even though it is in FINISHED state.
@@ -736,27 +737,26 @@ class TestWebPage(ImpalaTestSuite):
     assert check_if_contains, "No matching statement found in the jsons at {}: {}".format(
         datetime.now(), json.dumps(response_json, sort_keys=True, indent=4))
 
-  def __run_query_and_get_debug_page(self, query, page_url, query_options=None,
-                                     expected_state=None):
-    """Runs a query to obtain the content of the debug page pointed to by page_url, then
-    cancels the query. Optionally takes in an expected_state parameter, if specified the
-    method waits for the query to reach the expected state before getting its debug
-    information."""
-    with self.create_impala_client(protocol=HS2) as client:
-      if query_options:
-        client.set_configuration(query_options)
-      query_handle = client.execute_async(query)
-      if expected_state:
-        client.wait_for_impala_state(query_handle, expected_state, 100)
-      query_id = client.handle_id(query_handle)
-      responses = self.get_and_check_status(
-        "{0}?query_id={1}&json".format(page_url, query_id),
-        ports_to_test=self.IMPALAD_TEST_PORT)
-      assert len(responses) == 1
-      response_json = json.loads(responses[0].text)
-      client.cancel(query_handle)
-      client.close_query(query_handle)
-      return (query_id, response_json)
+  def test_failing_ctas(self, unique_database):
+    """Regression test for IMPALA-14791: Verify that a failing CTAS query does not
+    crash Impala when the plan is retrieved."""
+    target_tbl = unique_database + ".ctas_target_fail"
+    ctas_query = """create table {0} stored as iceberg as
+                  select 100000""".format(target_tbl)
+    debug_action = {'debug_action': 'CATALOGD_ICEBERG_CREATE:EXCEPTION@'
+        'IcebergAlreadyExistsException@Table was created concurrently'}
+    (_, response_json) = self.run_query_and_get_debug_page(
+        ctas_query, self.QUERY_PLAN, query_options=debug_action,
+        expected_state='ERROR')
+    # Verify that we have a non-empty plan_json.
+    assert 'plan_json' in response_json
+    assert 'plan_nodes' in response_json['plan_json']
+    assert 'label' in response_json['plan_json']['plan_nodes'][0]
+    # Summary is empty as execution could not start.
+    assert 'summary' in response_json
+    assert response_json['summary'] == ''
+    # Verify error message
+    assert "Table already exists" in response_json['status']
 
   @pytest.mark.xfail(run=False, reason="IMPALA-8059")
   def test_backend_states(self, unique_database):
@@ -768,10 +768,10 @@ class TestWebPage(ImpalaTestSuite):
     backend_state_properties = ['cpu_user_s', 'rpc_latency', 'num_remaining_instances',
                                 'num_instances', 'peak_per_host_mem_consumption',
                                 'time_since_last_heard_from', 'status', 'host',
-                                'cpu_sys_s', 'done', 'bytes_read']
+                                'cpu_sys_s', 'done', 'bytes_read', 'rpc_size']
 
     for query in [sleep_query, ctas_sleep_query]:
-      (_, response_json) = self.__run_query_and_get_debug_page(
+      (_, response_json) = self.run_query_and_get_debug_page(
           query, self.QUERY_BACKENDS_URL, expected_state=running_state)
 
       assert 'backend_states' in response_json
@@ -784,7 +784,7 @@ class TestWebPage(ImpalaTestSuite):
         assert backend_state['status'] == 'OK'
         assert not backend_state['done']
 
-    (_, response_json) = self.__run_query_and_get_debug_page(
+    (_, response_json) = self.run_query_and_get_debug_page(
         "describe functional.alltypes", self.QUERY_BACKENDS_URL)
     assert 'backend_states' not in response_json
 
@@ -800,7 +800,7 @@ class TestWebPage(ImpalaTestSuite):
                                  'instance_id', 'done']
 
     for query in [sleep_query, ctas_sleep_query]:
-      (_, response_json) = self.__run_query_and_get_debug_page(
+      (_, response_json) = self.run_query_and_get_debug_page(
           query, self.QUERY_FINSTANCES_URL, query_options=query_options,
           expected_state=running_state)
 
@@ -819,7 +819,7 @@ class TestWebPage(ImpalaTestSuite):
             assert instance_stats_property in instance_stats
         assert not instance_stats['done']
 
-    (_, response_json) = self.__run_query_and_get_debug_page(
+    (_, response_json) = self.run_query_and_get_debug_page(
         "describe functional.alltypes", self.QUERY_BACKENDS_URL,
         query_options=query_options)
     assert 'backend_instances' not in response_json
@@ -852,23 +852,27 @@ class TestWebPage(ImpalaTestSuite):
 
   def test_rpc_read_write_metrics(self):
     """Test that read/write metrics are exposed in /rpcz"""
-    rpcz = self.get_debug_page(self.RPCZ_URL)
-    hist_time_regex = "[0-9][0-9numsh.]*"
-    rpc_histogram_regex = (
-      "Count: [0-9]+, sum: " + hist_time_regex
-      + ", min / max: " + hist_time_regex + " / " + hist_time_regex
-      + ", 25th %-ile: " + hist_time_regex
-      + ", 50th %-ile: " + hist_time_regex
-      + ", 75th %-ile: " + hist_time_regex
-      + ", 90th %-ile: " + hist_time_regex
-      + ", 95th %-ile: " + hist_time_regex
-      + ", 99.9th %-ile: " + hist_time_regex)
+    rpcz = self._get_debug_page(self.RPCZ_URL)
+
+    def create_histogram_regex(value_regex):
+      return ("Count: [0-9]+, sum: " + value_regex
+        + ", min / max: " + value_regex + " / " + value_regex
+        + ", 25th %-ile: " + value_regex
+        + ", 50th %-ile: " + value_regex
+        + ", 75th %-ile: " + value_regex
+        + ", 90th %-ile: " + value_regex
+        + ", 95th %-ile: " + value_regex
+        + ", 99.9th %-ile: " + value_regex)
+    rpc_hist_time_regex = create_histogram_regex("[0-9][0-9numsh.]*")
+    rpc_hist_unit_regex = create_histogram_regex("[0-9][0-9KM.]*")
     assert len(rpcz['servers']) > 0
     for s in rpcz['servers']:
       for m in s['methods']:
-        assert re.search(rpc_histogram_regex, m["summary"])
-        assert re.search(rpc_histogram_regex, m["read"])
-        assert re.search(rpc_histogram_regex, m["write"])
+        assert re.search(rpc_hist_time_regex, m["summary"])
+        assert re.search(rpc_hist_time_regex, m["read"])
+        assert re.search(rpc_hist_time_regex, m["write"])
+    assert re.search(rpc_hist_time_regex, rpcz['reactor_active_latency'])
+    assert re.search(rpc_hist_unit_regex, rpcz['reactor_load_percent'])
 
   def test_krpc_rpcz(self):
     """Test that KRPC metrics are exposed in /rpcz and that they are updated when
@@ -878,12 +882,12 @@ class TestWebPage(ImpalaTestSuite):
     SVC_NAME = 'impala.DataStreamService'
 
     def is_krpc_use_unix_domain_socket():
-      rpcz = self.get_debug_page(self.RPCZ_URL)
+      rpcz = self._get_debug_page(self.RPCZ_URL)
       return rpcz['rpc_use_unix_domain_socket']
 
     def get_per_conn_metrics(inbound):
       """Get inbound or outbound per-connection metrics"""
-      rpcz = self.get_debug_page(self.RPCZ_URL)
+      rpcz = self._get_debug_page(self.RPCZ_URL)
       if inbound:
         key = "inbound_per_conn_metrics"
       else:
@@ -892,10 +896,11 @@ class TestWebPage(ImpalaTestSuite):
       return conns
 
     def get_svc_metrics(svc_name):
-      rpcz = self.get_debug_page(self.RPCZ_URL)
+      rpcz = self._get_debug_page(self.RPCZ_URL)
       assert len(rpcz['services']) > 0
       for s in rpcz['services']:
         if s['service_name'] == svc_name:
+          assert s['rpcs_timed_out_in_queue'] == 0
           assert len(s['rpc_method_metrics']) > 0, '%s metrics are empty' % svc_name
           return sorted(s['rpc_method_metrics'], key=lambda m: m['method_name'])
       assert False, 'Could not find metrics for %s' % svc_name
@@ -1198,6 +1203,240 @@ class TestWebPage(ImpalaTestSuite):
       LOG.info("Queries: " + queries_page)
     assert matched
 
+  def test_catalog_operation_detail_endpoint(self, unique_database):
+    """Test the /operation_detail endpoint shows detailed information about catalog
+       operations including thrift request, timeline, and byte sizes."""
+    # Execute a DDL to generate a catalog operation
+    # Use CTAS to generate multiple catalog operations
+    result = self.execute_query(
+        "create table {0}.test_detail as select * from functional.alltypes limit 10"
+        .format(unique_database))
+    expected_query_id = result.query_id
+
+    # Get the operation from /operations endpoint
+    catalog_operations_page = requests.get("http://localhost:25020/operations?json").text
+    catalog_operations = json.loads(catalog_operations_page)
+    assert "finished_catalog_operations" in catalog_operations
+    assert len(catalog_operations["finished_catalog_operations"]) > 0
+
+    # Find finished CTAS operations - there should be two:
+    # CREATE_TABLE_AS_SELECT and FINALIZE_CREATE_TABLE_AS_SELECT
+    ctas_operations = []
+    for op in catalog_operations["finished_catalog_operations"]:
+      if expected_query_id in op["query_id"] and \
+          ("CREATE_TABLE_AS_SELECT" in op["catalog_op_name"]
+          or "FINALIZE_CREATE_TABLE_AS_SELECT" in op["catalog_op_name"]):
+        ctas_operations.append(op)
+
+    assert len(ctas_operations) == 2, \
+        "Expected 2 CTAS operations (CREATE_TABLE_AS_SELECT and " \
+        "FINALIZE_CREATE_TABLE_AS_SELECT), found {0}. " \
+        "Operations: {1}".format(len(ctas_operations),
+        ", ".join([op["catalog_op_name"] for op in ctas_operations]))
+
+    # Verify both operations have the correct query_id
+    for test_op in ctas_operations:
+      query_id = test_op["query_id"]
+      thread_id = test_op["thread_id"]
+      start_time_ms = test_op["start_time_ms"]
+
+      # Verify query_id matches what we got from execute_query
+      assert expected_query_id in query_id, \
+          "Query ID mismatch: expected {0}, got {1}".format(expected_query_id, query_id)
+
+      LOG.info("Testing operation detail for query_id: {0}, thread_id: {1}, op: {2}"
+          .format(query_id, thread_id, test_op["catalog_op_name"]))
+
+      # Test HTML endpoint returns 200 OK (requires start_time_ms for finished operations)
+      html_response = requests.get(
+          "http://localhost:25020/operation_detail?query_id={0}&thread_id={1}"
+          "&start_time_ms={2}".format(query_id, thread_id, start_time_ms))
+      assert html_response.status_code == requests.codes.ok
+      assert "Operation Information" in html_response.text
+      assert "Execution Timeline" in html_response.text
+
+      # Test JSON endpoint returns proper data
+      json_response = requests.get(
+          "http://localhost:25020/operation_detail?query_id={0}&thread_id={1}"
+          "&start_time_ms={2}&json".format(query_id, thread_id, start_time_ms))
+      assert json_response.status_code == requests.codes.ok
+      detail_data = json.loads(json_response.text)
+
+      # Verify basic operation fields are present
+      assert "query_id" in detail_data
+      assert detail_data["query_id"] == query_id
+      assert "catalog_op_name" in detail_data
+      assert test_op["catalog_op_name"] in detail_data["catalog_op_name"]
+      assert "target_name" in detail_data
+      assert "user" in detail_data
+      assert "status" in detail_data
+      assert "start_time" in detail_data
+      assert "finish_time" in detail_data
+      assert "duration" in detail_data
+      assert "timeline" in detail_data, "timeline field missing"
+      assert "request_size_bytes" in detail_data, "request_size_bytes field missing"
+      assert "response_size_bytes" in detail_data, "response_size_bytes field missing"
+
+      # Verify the fields contain actual data
+      assert len(detail_data["timeline"]) > 0, "timeline should not be empty"
+      assert detail_data["request_size_bytes"] > 0, \
+          "request_size_bytes should be positive"
+      assert detail_data["response_size_bytes"] > 0, \
+          "response_size_bytes should be positive"
+
+      # Verify timeline is formatted text (pre-formatted on server side)
+      timeline_str = detail_data["timeline"]
+      assert isinstance(timeline_str, str), "timeline should be a formatted string"
+
+      # Check for expected timeline format from RuntimeProfile
+      assert "Catalog Server Operation:" in timeline_str, \
+          "timeline should have the operation name"
+      # Check that it contains typical timeline events
+      assert ("Got" in timeline_str or "DDL" in timeline_str
+          or "finished" in timeline_str), "timeline should contain at least one event"
+
+  def test_catalog_operation_detail_invalid_query_id(self):
+    """Test that /operation_detail handles invalid query_id gracefully."""
+    # Test with a non-existent query_id and thread_id
+    response = requests.get(
+        "http://localhost:25020/operation_detail"
+        "?query_id=nonexistent:123456789abcd"
+        "&thread_id=999&json"
+    )
+    assert response.status_code == requests.codes.ok
+    detail_data = json.loads(response.text)
+    assert "error" in detail_data
+
+    # Test without thread_id (should return error about missing parameter)
+    response = requests.get(
+        "http://localhost:25020/operation_detail?query_id=nonexistent:123456789abcd&json")
+    assert response.status_code == requests.codes.ok
+    detail_data = json.loads(response.text)
+    assert "error" in detail_data
+    assert "thread_id" in detail_data["error"].lower(), \
+        "Should return error for non-existent query_id"
+
+    # Test with missing query_id parameter
+    response = requests.get("http://localhost:25020/operation_detail?json")
+    assert response.status_code == requests.codes.ok
+    detail_data = json.loads(response.text)
+    assert "error" in detail_data, \
+        "Should return error when query_id parameter is missing"
+
+    # Test with missing start_time_ms for a finished operation
+    # First, execute a simple DDL to get a finished operation
+    self.execute_query("create database if not exists test_invalid_param_db")
+    catalog_operations_page = requests.get("http://localhost:25020/operations?json").text
+    catalog_operations = json.loads(catalog_operations_page)
+    if len(catalog_operations.get("finished_catalog_operations", [])) > 0:
+      finished_op = catalog_operations["finished_catalog_operations"][0]
+      query_id = finished_op["query_id"]
+      thread_id = finished_op["thread_id"]
+      # Try to access finished operation without start_time_ms (should fail)
+      response = requests.get(
+          "http://localhost:25020/operation_detail?query_id={0}&thread_id={1}&json"
+          .format(query_id, thread_id))
+      assert response.status_code == requests.codes.ok
+      detail_data = json.loads(response.text)
+      assert "error" in detail_data, \
+          "Should return error when start_time_ms is missing for finished operation"
+      assert "start_time_ms" in detail_data["error"].lower(), \
+          "Error message should mention start_time_ms"
+
+  @pytest.mark.execute_serially
+  def test_catalog_operation_detail_in_flight(self, unique_database):
+    """Test that /operation_detail shows real-time timeline for in-flight operations.
+       Uses a debug action to inject a delay in DDL execution."""
+    # Create a table first, then refresh it with a delay
+    # Use catalogd_refresh_hdfs_listing_delay which triggers during REFRESH
+    self.client.execute("create table {0}.test_in_flight (id int)"
+        .format(unique_database))
+
+    delay_action = "catalogd_refresh_hdfs_listing_delay:SLEEP@100"
+
+    # Start the REFRESH asynchronously
+    refresh_stmt = "refresh {0}.test_in_flight".format(unique_database)
+    # Set the debug action before executing
+    self.client.set_configuration({"debug_action": delay_action})
+    handle = self.client.execute_async(refresh_stmt)
+
+    # Get the query_id from the handle
+    expected_query_id = self.client.get_query_id(handle)
+
+    try:
+      # Poll for the in-flight operation (with timeout)
+      inflight_op = None
+      query_id = None
+      max_attempts = 20
+      attempt = 0
+
+      while attempt < max_attempts and inflight_op is None:
+        attempt += 1
+
+        # Get in-flight operations
+        catalog_operations_page = requests.get(
+            "http://localhost:25020/operations?json").text
+        catalog_operations = json.loads(catalog_operations_page)
+
+        # Find the in-flight REFRESH operation
+        if "inflight_catalog_operations" in catalog_operations:
+          for op in catalog_operations["inflight_catalog_operations"]:
+            if op["catalog_op_name"] == "REFRESH" and \
+                op["target_name"] == "{0}.test_in_flight".format(unique_database):
+              inflight_op = op
+              query_id = op["query_id"]
+              break
+
+        # If not found yet, sleep before next attempt
+        if inflight_op is None and attempt < max_attempts:
+          time.sleep(0.1)
+
+      # Assert that we found the in-flight operation
+      assert inflight_op is not None, \
+          "In-flight REFRESH operation not found after {0} attempts".format(max_attempts)
+      thread_id = inflight_op["thread_id"]
+
+      # Verify query_id matches what we got from the handle
+      assert expected_query_id in query_id, \
+          "Query ID mismatch: expected {0}, got {1}".format(expected_query_id, query_id)
+
+      LOG.info("Found in-flight operation with query_id: {0}, thread_id: {1}".format(
+          query_id, thread_id))
+
+      # Test the operation_detail page for the in-flight operation
+      json_response = requests.get(
+          "http://localhost:25020/operation_detail?query_id={0}&thread_id={1}&json"
+          .format(query_id, thread_id))
+      assert json_response.status_code == requests.codes.ok
+      detail_data = json.loads(json_response.text)
+
+      # Verify the operation is in STARTED status
+      assert detail_data["status"] == "STARTED", \
+          "In-flight operation should have STARTED status"
+
+      # Verify timeline is present for in-flight operation
+      assert "timeline" in detail_data, \
+          "Timeline should be present for in-flight operation"
+      assert len(detail_data["timeline"]) > 0, \
+          "Timeline should not be empty for in-flight operation"
+
+      # Verify timeline is formatted text (not JSON)
+      timeline_str = detail_data["timeline"]
+      assert isinstance(timeline_str, str), "Timeline should be a formatted string"
+
+      # Check for expected timeline format from RuntimeProfile
+      assert "Catalog Server Operation:" in timeline_str, \
+          "Timeline should have the operation name"
+      assert ("Got Metastore client" in timeline_str or "Got catalog version"
+          in timeline_str), "Timeline should contain at least one event"
+
+      LOG.info("In-flight operation detail test passed")
+
+    finally:
+      # Wait for the query to complete and close it
+      self.client.wait_for_finished_timeout(handle, 30)
+      self.client.close_query(handle)
+
   def test_catalog_metrics(self):
     """Test /metrics of catalogd"""
     url = self.METRICS_URL.format(*self.CATALOG_TEST_PORT) + "?json"
@@ -1246,7 +1485,7 @@ class TestWebPage(ImpalaTestSuite):
   def test_query_progress(self):
     """Tests that /queries page shows query progress."""
     query = "select count(*) from functional_parquet.alltypes where bool_col = sleep(100)"
-    (query_id, response_json) = self.__run_query_and_get_debug_page(
+    (query_id, response_json) = self.run_query_and_get_debug_page(
         query, self.QUERIES_URL, expected_state=RUNNING)
     found = False
     for json_part in response_json['in_flight_queries']:

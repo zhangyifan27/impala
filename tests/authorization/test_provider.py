@@ -17,7 +17,6 @@
 #
 # Client tests for SQL statement authorization
 
-from __future__ import absolute_import, division, print_function
 import pytest
 
 from tests.common.file_utils import assert_file_in_dir_contains
@@ -44,12 +43,12 @@ class TestAuthorizationProvider(CustomClusterTestSuite):
       expect_cores=True,
       impala_log_dir="{" + LOG_DIR + "}",
       impalad_args="--minidump_path={" + MINIDUMP_PATH + "} "
-                   "--server-name=server1 "
+                   "--server_name=server1 "
                    "--ranger_service_type=hive "
                    "--ranger_app_id=impala "
                    "--authorization_provider=" + BAD_FLAG,
       catalogd_args="--minidump_path={" + MINIDUMP_PATH + "} "
-                    "--server-name=server1 "
+                    "--server_name=server1 "
                     "--ranger_service_type=hive "
                     "--ranger_app_id=impala "
                     "--authorization_provider=" + BAD_FLAG,

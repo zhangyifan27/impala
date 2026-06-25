@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hive.service.rpc.thrift.*;
-import org.apache.impala.analysis.AnalyzerTest;
 import org.apache.impala.testutil.WebClient;
 import org.apache.impala.testutil.X509CertChain;
 import org.apache.thrift.transport.THttpClient;
@@ -452,7 +451,7 @@ public class JwtHttpTest {
     String expectedErrString = String.format("Impalad services did not start correctly, "
         + "exiting.  Error: Error downloading JWKS from '%s': Network error: curl "
         + "error: SSL peer certificate or SSH remote key was not OK: SSL certificate "
-        + "problem: unable to get local issuer certificate", jwksHttpUrl);
+        + "OpenSSL verify result: unable to get local issuer certificate", jwksHttpUrl);
 
     // cluster start will fail because the TLS cert returned by the
     // JWKS server is not trusted

@@ -23,6 +23,7 @@ include "CatalogObjects.thrift"
 include "Types.thrift"
 include "Status.thrift"
 include "TCLIService.thrift"
+include "RuntimeProfile.thrift"
 include "hive_metastore.thrift"
 
 // This is a short value due to the HDFS API limits
@@ -67,6 +68,7 @@ enum TOwnerType {
 // Types of ALTER DATABASE commands supported.
 enum TAlterDbType {
   SET_OWNER = 0
+  SET_DBPROPERTIES = 1
 }
 
 // Parameters for ALTER DATABASE SET OWNER commands.
@@ -82,6 +84,11 @@ struct TAlterDbSetOwnerParams {
   3: optional string server_name
 }
 
+// Parameters for ALTER DATABASE SET DBPROPERTIES commands.
+struct TAlterDbSetDbPropertiesParams {
+  1: map<string, string> properties
+}
+
 struct TAlterDbParams {
   // The type of ALTER DATABASE command.
   1: required TAlterDbType alter_type
@@ -91,6 +98,9 @@ struct TAlterDbParams {
 
   // Parameters for ALTER DATABASE SET OWNER commands.
   3: optional TAlterDbSetOwnerParams set_owner_params
+
+  // Parameters for ALTER DATABASE SET DBPROPERTIES commands.
+  4: optional TAlterDbSetDbPropertiesParams set_dbproperties_params
 }
 
 // Types of ALTER TABLE commands supported.
@@ -145,6 +155,9 @@ struct TCreateDbParams {
   // Optional HDFS path for the database. Overrides location as the default location for
   // all managed tables created in the database.
   7: optional string managed_location
+
+  // Optional dbparams to be set after creation
+  8: optional map<string, string> properties
 }
 
 // Parameters of CREATE DATA SOURCE commands
@@ -912,6 +925,12 @@ struct TCatalogOpRecord {
   9: required i64 finish_time_ms
   10: required string status
   11: required string details
+  // Optional field for the timeline of execution in catalogd
+  12: optional RuntimeProfile.TEventSequence timeline
+  // Optional field for request size in bytes
+  13: optional i64 request_size_bytes
+  // Optional field for response size in bytes
+  14: optional i64 response_size_bytes
 }
 
 // Response to getOperationUsage request.

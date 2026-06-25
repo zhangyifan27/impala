@@ -35,7 +35,6 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.hadoop.hive.common.StatsSetupConst;
 import org.apache.hadoop.hive.ql.parse.HiveLexer;
-import org.apache.iceberg.TableProperties;
 import org.apache.impala.catalog.CatalogException;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.ColumnStats;
@@ -509,6 +508,7 @@ public class ToSqlUtils {
         table.getMetaStoreTable().getParameters());
     for (int i = 0; i < table.getColumns().size(); i++) {
       Column col = table.getColumns().get(i);
+      if (col.isHidden()) continue;
       if (!isHbaseTable && i < table.getNumClusteringCols()) {
         partitionColsSql.add(columnToSql(col));
       } else if (isFullAcid && i == table.getNumClusteringCols()) {
@@ -1061,8 +1061,7 @@ public class ToSqlUtils {
     if (col.getType() != null) sb.append(" " + col.getType().toSql());
     if (col instanceof KuduColumn) {
       KuduColumn kuduCol = (KuduColumn) col;
-      Boolean isNullable = kuduCol.isNullable();
-      if (isNullable != null) sb.append(isNullable ? " NULL" : " NOT NULL");
+      sb.append(kuduCol.isNullable() ? " NULL" : " NOT NULL");
       if (kuduCol.getEncoding() != null) sb.append(" ENCODING " + kuduCol.getEncoding());
       if (kuduCol.getCompression() != null) {
         sb.append(" COMPRESSION " + kuduCol.getCompression());
@@ -1074,9 +1073,7 @@ public class ToSqlUtils {
         sb.append(String.format(" BLOCK_SIZE %d", kuduCol.getBlockSize()));
       }
     } else if (col instanceof IcebergColumn) {
-      IcebergColumn icebergCol = (IcebergColumn) col;
-      Boolean isNullable = icebergCol.isNullable();
-      if (isNullable != null) sb.append(isNullable ? " NULL" : " NOT NULL");
+      sb.append(col.isNullable() ? " NULL" : " NOT NULL");
     }
     if (!Strings.isNullOrEmpty(col.getComment())) {
       sb.append(String.format(" COMMENT '%s'", col.getComment()));

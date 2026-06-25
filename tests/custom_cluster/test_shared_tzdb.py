@@ -17,7 +17,6 @@
 #
 # Tests for IMPALA-3307
 
-from __future__ import absolute_import, division, print_function
 import pytest
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
@@ -34,19 +33,10 @@ class TestSharedTimezoneDatabase(CustomClusterTestSuite):
      This file tests that the startup flags behave as expected.
   '''
 
-  @classmethod
-  def add_test_dimensions(cls):
-    super(CustomClusterTestSuite, cls).add_test_dimensions()
-    # Timestamp conversion doesn't depend on file format and compression.
-    # Cut down on testing time by limiting the file format and compression.
-    cls.ImpalaTestMatrix.add_constraint(lambda v:
-        v.get_value('table_format').file_format == 'text' and
-        v.get_value('table_format').compression_codec == 'none')
-
 
   @CustomClusterTestSuite.with_args("-hdfs_zone_info_zip=%s" %
       get_fs_path("/test-warehouse/tzdb/2017c.zip"))
-  def test_shared_timezones(self, vector):
+  def test_shared_timezones(self):
     result = self.client.execute("select timezone, utctime, localtime, \
         from_utc_timestamp(utctime,timezone) as impalaresult from \
         functional.alltimezones where localtime != from_utc_timestamp(utctime,timezone)")
@@ -55,7 +45,7 @@ class TestSharedTimezoneDatabase(CustomClusterTestSuite):
 
   @CustomClusterTestSuite.with_args("-hdfs_zone_info_zip=%s" %
       get_fs_path("/test-warehouse/tzdb/2017c.zip"))
-  def test_invalid_aliases(self, vector):
+  def test_invalid_aliases(self):
     """ Test that conversions from/to invalid timezones return the timestamp
         without change and issue a warning.
 
@@ -74,7 +64,7 @@ class TestSharedTimezoneDatabase(CustomClusterTestSuite):
   @CustomClusterTestSuite.with_args("-hdfs_zone_info_zip=%s -hdfs_zone_alias_conf=%s" %
       (get_fs_path("/test-warehouse/tzdb/2017c.zip"),
       get_fs_path("/test-warehouse/tzdb/alias.conf")))
-  def test_shared_timezone_aliases(self, vector):
+  def test_shared_timezone_aliases(self):
     ts_utc = '2018-04-19 13:07:48.891829000'
     ts_utc_plus5400sec = '2018-04-19 14:37:48.891829000'
     ts_utc_min5400sec = '2018-04-19 11:37:48.891829000'

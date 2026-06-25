@@ -1076,6 +1076,12 @@ where 10.1 not in (tinyint_col, smallint_col, int_col, bigint_col, float_col, do
 8990
 ---- TYPES
 bigint
+=====
+---- QUERY
+# Test that casts are not allowed between DATE and numerical types
+select cast(date '2000-12-21' as int);
+---- CATCH
+AnalysisException: Invalid type cast from DATE to INT
 ====
 ---- QUERY
 # Test for varchar ndv with both 1 and 2 parameters
@@ -1223,4 +1229,101 @@ values ('abc'), ('defg')
 string
 ---- RUNTIME_PROFILE
 row_regex: .*PlannerType: CalcitePlanner.*
+====
+---- QUERY
+# IMPALA-14758: make sure server doesn't crash
+# can probably remove this test once tests are run through
+# jenkins, since this is repeated in a different file.
+SELECT a.id, a.int_col, a.string_col FROM functional.alltypessmall a
+WHERE 1 NOT IN
+(SELECT CASE WHEN id = 1 then null ELSE id END FROM functional.alltypestiny);
+---- RESULTS
+====
+---- QUERY
+# IMPALA-14429: Ensure correct type is used when decimal and ints are in an IN clause.
+select count(*) from tpch.lineitem where l_quantity in (1, 2)
+---- RESULTS
+239861
+====
+---- QUERY
+# IMPALA-14525: Make sure null is treated as unknown in select clause
+SELECT 1 in (NULL);
+---- RESULTS
+NULL
+---- RUNTIME_PROFILE
+row_regex: .*PlannerType: CalcitePlanner.*
+====
+---- QUERY
+# test single row optimization with limit clause
+explain select id from functional.alltypes where bigint_col > sqrt(id) limit 1;
+---- RESULTS: VERIFY_IS_SUBSET
+'   predicates: functional.alltypes.bigint_col > sqrt(functional.alltypes.id)'
+---- RUNTIME_PROFILE
+row_regex: PlannerType: CalcitePlanner
+====
+---- QUERY
+# without straight join
+explain select a.bigint_col from functional.alltypestiny a
+inner join functional.alltypessmall b on a.id = b.id
+---- RUNTIME_PROFILE
+row_regex: .*PlannerType: CalcitePlanner.*
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:.*01:SCAN $FILESYSTEM_NAME \[functional.alltypestiny\]*
+row_regex:.*00:SCAN $FILESYSTEM_NAME \[functional.alltypessmall\]*
+====
+---- QUERY
+# with straight join
+explain select straight_join a.bigint_col from functional.alltypestiny a
+inner join functional.alltypessmall b on a.id = b.id
+---- RUNTIME_PROFILE
+row_regex: .*PlannerType: CalcitePlanner.*
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:.*01:SCAN $FILESYSTEM_NAME \[functional.alltypessmall\]*
+row_regex:.*00:SCAN $FILESYSTEM_NAME \[functional.alltypestiny\]*
+====
+---- QUERY
+# with straight join with alternative parsing
+explain select /* +straight_join */ a.bigint_col from functional.alltypestiny a
+inner join functional.alltypessmall b on a.id = b.id
+---- RUNTIME_PROFILE
+row_regex: .*PlannerType: CalcitePlanner.*
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:.*01:SCAN $FILESYSTEM_NAME \[functional.alltypessmall\]*
+row_regex:.*00:SCAN $FILESYSTEM_NAME \[functional.alltypestiny\]*
+====
+---- QUERY
+select string_col from functional.alltypestiny where string_col like '1%';
+---- RESULTS
+'1'
+'1'
+'1'
+'1'
+---- RUNTIME_PROFILE
+row_regex: PlannerType: CalcitePlanner
+====
+---- QUERY
+# this query fails in the original planner, see IMPALA-5098
+select distinct year, month,
+sum(int_col) over (partition by year, month)
+from functional.alltypessmall
+where id % 4 = 0 and month != 1;
+---- RESULTS
+2009,4,26
+2009,3,22
+2009,2,28
+---- TYPES
+int,int,bigint
+---- RUNTIME_PROFILE
+row_regex: PlannerType: CalcitePlanner
+====
+---- QUERY
+# IMPALA-14814: Even with a cast, the parquet statitics predicates
+# and the parquet dictionary predicates should be created.
+select count(*) from functional_parquet.alltypessmall where tinyint_col > 1000000000000
+---- RESULTS
+0
+---- RUNTIME_PROFILE
+row_regex: PlannerType: CalcitePlanner
+parquet statistics predicates: CAST(functional_parquet.alltypessmall.tinyint_col AS BIGINT) > CAST(1000000000000 AS BIGINT)
+parquet dictionary predicates: CAST(functional_parquet.alltypessmall.tinyint_col AS BIGINT) > CAST(1000000000000 AS BIGINT)
 ====

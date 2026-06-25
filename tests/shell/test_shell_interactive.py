@@ -17,7 +17,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import http.client
 import http.server
 import logging
@@ -26,10 +25,10 @@ import re
 import signal
 import socket
 import socketserver
-import sys
 from tempfile import NamedTemporaryFile
 import threading
 from time import sleep
+from tests.common.environ import IS_CALCITE_PLANNER
 
 import pexpect
 import pytest
@@ -51,6 +50,7 @@ from tests.common.test_dimensions import (
     create_uncompressed_text_dimension,
 )
 from tests.common.test_result_verifier import error_msg_startswith
+from tests.common.test_vector import BEESWAX, HS2, HS2_HTTP, PROTOCOL
 from tests.shell.util import (
     assert_var_substitution,
     create_impala_shell_executable_dimension,
@@ -148,6 +148,9 @@ def shutdown_server(server):
     server.httpd.shutdown()
   if server.http_server_thread is not None:
     server.http_server_thread.join()
+  # Shutdown stopped the thread's main loop, so now free the socket (which is not
+  # done by shutdown()).
+  server.httpd.server_close()
 
 
 @pytest.fixture
@@ -185,7 +188,7 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     cls.ImpalaTestMatrix.add_dimension(create_client_protocol_dimension())
     cls.ImpalaTestMatrix.add_dimension(create_client_protocol_strict_dimension())
     cls.ImpalaTestMatrix.add_constraint(lambda v:
-        v.get_value('protocol') != 'beeswax' or not v.get_value('strict_hs2_protocol'))
+        v.get_value('protocol') != BEESWAX or not v.get_value('strict_hs2_protocol'))
     # Test combination of Python versions and tarball/PyPI
     cls.ImpalaTestMatrix.add_dimension(create_impala_shell_executable_dimension())
 
@@ -421,8 +424,6 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
   def test_sigusr1_stacktraces(self, vector):
     if vector.get_value('strict_hs2_protocol'):
       pytest.skip("Strict HS2 mode doesn't support sleep() function")
-    if vector.get_value('impala_shell') in ['dev', 'python2']:
-      pytest.skip("Python 2 doesn't support faulthandler")
     command = "select sleep(5000); quit;"
     p = ImpalaShell(vector)
     p.send_cmd(command)
@@ -570,13 +571,13 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
       initial_impala_service = ImpaladService(hostname)
       target_impala_service = ImpaladService(hostname, webserver_port=25001,
           beeswax_port=21001, hs2_port=21051, hs2_http_port=28001)
-      protocol = vector.get_value("protocol").lower()
-      if protocol == "hs2":
+      protocol = vector.get_value(PROTOCOL).lower()
+      if protocol == HS2:
         target_port = 21051
-      elif protocol == "hs2-http":
+      elif protocol == HS2_HTTP:
         target_port = 28001
       else:
-        assert protocol == "beeswax"
+        assert protocol == BEESWAX
         target_port = 21001
       # This test is running serially, so there shouldn't be any open sessions, but wait
       # here in case a session from a previous test hasn't been fully closed yet.
@@ -950,7 +951,7 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     assert "ABORT_ON_ERROR" in result.stdout
     assert "Advanced Query Options:" in result.stdout
     assert "APPX_COUNT_DISTINCT" in result.stdout
-    assert vector.get_value("protocol") in ("hs2", "hs2-http")\
+    assert vector.get_value(PROTOCOL) in (HS2, HS2_HTTP)\
         or "SUPPORT_START_OVER" in result.stdout
     # Development, deprecated and removed options should not be shown.
     # Note: there are currently no deprecated options
@@ -972,7 +973,7 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     development_part = result.stdout[development_part_start_idx:deprecated_part_start_idx]
     assert "ABORT_ON_ERROR" in result.stdout[:advanced_part_start_idx]
     assert "APPX_COUNT_DISTINCT" in advanced_part
-    assert vector.get_value("protocol") in ("hs2", "hs2-http")\
+    assert vector.get_value(PROTOCOL) in (HS2, HS2_HTTP)\
         or "SUPPORT_START_OVER" in advanced_part
     assert "DEBUG_ACTION" in development_part
     # Removed options should not be shown.
@@ -1093,11 +1094,14 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
       assert '| \'--\' |' in result.stdout
       assert '| --   |' in result.stdout
 
+    # IMPALA-14405: The Calcite planner current creates its own header
+    # for the nested 'select count(*)'
+    header = '`v`.`expr$0`' if IS_CALCITE_PLANNER else 'count(*)'
     query = ('select * from (\n'
              'select count(*) from functional.alltypes\n'
              ') v; -- Incomplete SQL statement in this line')
     result = run_impala_shell_interactive(vector, query)
-    assert '| count(*) |' in result.stdout
+    assert '| ' + header + ' |' in result.stdout
 
     query = ('select id from functional.alltypes\n'
              'order by id; /*\n'
@@ -1317,8 +1321,8 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
   def test_http_interactions(self, vector, http_503_server):
     """Test interactions with the http server when using hs2-http protocol.
     Check that the shell prints a good message when the server returns a 503 error."""
-    protocol = vector.get_value("protocol")
-    if protocol != 'hs2-http':
+    protocol = vector.get_value(PROTOCOL)
+    if protocol != HS2_HTTP:
       pytest.skip()
 
     # Check that we get a message about the 503 error when we try to connect.
@@ -1332,8 +1336,8 @@ class TestImpalaShellInteractive(ImpalaTestSuite):
     """Test interactions with the http server when using hs2-http protocol.
     Check that the shell prints a good message when the server returns a 503 error,
     including the body text from the message."""
-    protocol = vector.get_value("protocol")
-    if protocol != 'hs2-http':
+    protocol = vector.get_value(PROTOCOL)
+    if protocol != HS2_HTTP:
       pytest.skip()
 
     # Check that we get a message about the 503 error when we try to connect.

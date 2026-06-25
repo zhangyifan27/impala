@@ -29,6 +29,7 @@ import org.apache.iceberg.TableProperties;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.FeIcebergTable;
 import org.apache.impala.catalog.IcebergColumn;
+import org.apache.impala.catalog.IcebergContentFileStore;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.Pair;
 import org.apache.impala.planner.DataSink;
@@ -63,6 +64,24 @@ public class IcebergUpdateImpl extends IcebergModifyImpl {
 
   public void analyze(Analyzer analyzer) throws AnalysisException {
     super.analyze(analyzer);
+    if (originalTargetTable_.getFormatVersion() > 3) {
+      throw new AnalysisException(String.format(
+          "Impala does not support UPDATE statements on Iceberg tables with format " +
+          "version %d", originalTargetTable_.getFormatVersion()));
+    }
+    if (originalTargetTable_.getFormatVersion() >= 3) {
+      IcebergContentFileStore fileStore = originalTargetTable_.getContentFileStore();
+      int positionDeletes = fileStore.getPositionDeleteFiles().size();
+      if (positionDeletes > 0) {
+        throw new AnalysisException(String.format(
+            "UPDATE is not allowed on Iceberg format version 3 table '%s' as it "
+                + "has existing version 2 position delete file(s): "
+                + "%d position delete file(s). Run 'OPTIMIZE TABLE %s' to rewrite the "
+                + "files and remove deletion files before attempting UPDATE.",
+            originalTargetTable_.getFullName(), positionDeletes,
+            originalTargetTable_.getFullName()));
+      }
+    }
     deleteTableId_ = analyzer.getDescTbl().addTargetTable(icePosDelTable_);
     IcebergUtil.validateIcebergTableForInsert(originalTargetTable_);
   }
@@ -108,7 +127,7 @@ public class IcebergUpdateImpl extends IcebergModifyImpl {
       colToExprs.put(c.getPosition(), rhsExpr);
     }
 
-    List<Column> columns = modifyStmt_.table_.getColumns();
+    List<Column> columns = modifyStmt_.table_.getColumnsInHiveOrder();
     for (Column col : columns) {
       Expr expr = colToExprs.get(col.getPosition());
       if (expr == null) {
@@ -117,15 +136,34 @@ public class IcebergUpdateImpl extends IcebergModifyImpl {
       }
       insertResultExprs_.add(expr);
     }
+    addRowLineageExprs(analyzer, modifyStmt_.targetTableRef_, insertResultExprs_);
     IcebergUtil.populatePartitionExprs(analyzer, null, columns,
         insertResultExprs_, originalTargetTable_, insertPartitionKeyExprs_, null);
     deletePartitionKeyExprs_ = getDeletePartitionExprs(analyzer);
     deleteResultExprs_ = getDeleteResultExprs(analyzer);
+    shuffleExprs_ = buildShuffleExprs(analyzer);
     selectList.addAll(ExprUtil.exprsAsSelectList(insertResultExprs_));
     selectList.addAll(ExprUtil.exprsAsSelectList(insertPartitionKeyExprs_));
     selectList.addAll(ExprUtil.exprsAsSelectList(deleteResultExprs_));
     selectList.addAll(ExprUtil.exprsAsSelectList(deletePartitionKeyExprs_));
+    if (originalTargetTable_.getFormatVersion() >= 3 &&
+        !originalTargetTable_.isPartitioned()) {
+      // For V3 tables, we need to add file name to the select list for shuffle to ensure
+      // that all rows from the same file are shuffled to the same node.
+      selectList.addAll(ExprUtil.exprsAsSelectList(shuffleExprs_));
+    }
     addSortColumns();
+  }
+
+  /**
+   * UPDATE operation on Iceberg V3 tables need to preserve row-id of the records.
+   * _last_update_sequence_number is not carried over as the updated record should
+   * inherit it from the newly written data file.
+   */
+  private void addRowLineageExprs(Analyzer analyzer, TableRef tableRef,
+                                  List<Expr> resultExprs) throws AnalysisException {
+    if (originalTargetTable_.getFormatVersion() < 3) return;
+    resultExprs.add(IcebergUtil.getAnalyzedRowIdExpr(analyzer, tableRef));
   }
 
   private void addSortColumns() throws AnalysisException {
@@ -161,6 +199,14 @@ public class IcebergUpdateImpl extends IcebergModifyImpl {
   }
 
   @Override
+  protected List<Expr> getPartitionedShuffleExprs() {
+    if (originalTargetTable_.getFormatVersion() >= 3) {
+      return deletePartitionKeyExprs_;
+    }
+    return insertPartitionKeyExprs_;
+  }
+
+  @Override
   public TSortingOrder getSortingOrder() { return sortingOrder_; }
 
   public void substituteResultExprs(ExprSubstitutionMap smap, Analyzer analyzer) {
@@ -183,6 +229,8 @@ public class IcebergUpdateImpl extends IcebergModifyImpl {
         icePosDelTable_, deletePartitionKeyExprs_, deleteResultExprs_, deleteTableId_);
 
     MultiDataSink ret = new MultiDataSink();
+    // The real table sink should be added as the first element, before the virtual tables
+    // This order is maintained to conveniently retrieve the actual table name
     ret.addDataSink(insertSink);
     ret.addDataSink(deleteSink);
     return ret;

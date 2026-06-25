@@ -15,10 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import os
-
-from builtins import range
 import pytest
 
 from impala_thrift_gen.CatalogObjects.ttypes import THdfsCompression
@@ -372,13 +369,6 @@ class TestCorruptTableStats(ImpalaTestSuite):
 
 
 class TestIncompatibleColStats(ImpalaTestSuite):
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestIncompatibleColStats, cls).add_test_dimensions()
-    # There is no reason to run these tests using all dimensions.
-    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.ImpalaTestMatrix.add_dimension(
-        create_uncompressed_text_dimension(cls.get_workload()))
 
   def test_incompatible_col_stats(self, unique_database):
     """Tests Impala is able to use tables when the column stats data is not compatible
@@ -426,20 +416,13 @@ class TestParquetComputeColumnMinMax(ImpalaTestSuite):
 
 
 class TestInvalidStatsFromHms(ImpalaTestSuite):
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestInvalidStatsFromHms, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_dimension(create_single_exec_option_dimension())
-    cls.ImpalaTestMatrix.add_constraint(
-        lambda v: v.get_value('table_format').file_format == 'text'
-        and v.get_value('table_format').compression_codec == 'none')
 
   def test_invalid_col_stats(self, unique_database):
     """Test that invalid column stats, i.e. values < -1, are normalized in Impala"""
     tbl = unique_database + ".tbl"
     self.execute_query("create table {} as select 1 as id, 'aaa' as name".format(tbl))
     # Add invalid stats in HMS
-    hms_client, _ = ImpalaTestSuite.create_hive_client(9083)
+    hms_client, hms_transport = ImpalaTestSuite.create_hive_client(9083)
     cs = ColumnStatistics()
     cs.engine = "impala"
     isTblLevel = True
@@ -460,3 +443,4 @@ class TestInvalidStatsFromHms(ImpalaTestSuite):
     assert res.data == [
       'id\tTINYINT\t-1\t-1\t1\t1\t-1\t-1',
       'name\tSTRING\t-1\t-1\t-1\t-1\t-1\t-1']
+    hms_transport.close()

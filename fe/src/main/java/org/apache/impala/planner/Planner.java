@@ -37,7 +37,6 @@ import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.ExprSubstitutionMap;
 import org.apache.impala.analysis.InsertStmt;
 import org.apache.impala.analysis.JoinOperator;
-import org.apache.impala.analysis.MergeCase;
 import org.apache.impala.analysis.MergeStmt;
 import org.apache.impala.analysis.ParsedStatement;
 import org.apache.impala.analysis.QueryStmt;
@@ -227,8 +226,8 @@ public class Planner {
 
     ColumnLineageGraph graph = ctx_.getRootAnalyzer().getColumnLineageGraph();
     if (BackendConfig.INSTANCE.getComputeLineage() || RuntimeEnv.INSTANCE.isTestEnv()) {
-      // Lineage is disabled for UPDATE, DELETE and MERGE statements
-      if (ctx_.isUpdate() || ctx_.isDelete() || ctx_.isMerge())
+      // Lineage is disabled for UPDATE, DELETE, MERGE and OPTIMIZE statements
+      if (ctx_.isUpdate() || ctx_.isDelete() || ctx_.isMerge() || ctx_.isOptimize())
         return fragments;
       // Compute the column lineage graph
       if (ctx_.isInsertOrCtas()) {
@@ -279,7 +278,8 @@ public class Planner {
       }
       List<Expr> outputExprs = new ArrayList<>();
       rootFragment.getSink().collectExprs(outputExprs);
-      graph.computeLineageGraph(outputExprs, ctx_.getRootAnalyzer());
+      graph.computeLineageGraph(outputExprs, ctx_.getRootAnalyzer(),
+          ctx_.getAnalysisResult().getParsedStmt().getOperationType());
       if (LOG.isTraceEnabled()) LOG.trace("lineage: " + graph.debugString());
       ctx_.getTimeline().markEvent("Lineage info computed");
     }
@@ -299,7 +299,7 @@ public class Planner {
     // IcebergBufferedDeleteSink. UPDATE/MERGE statements will still require to
     // sort their data records.
     if (!(stmt instanceof DeleteStmt)) {
-      createPreDmlSort(stmt, rootFragment, ctx_.getRootAnalyzer());
+      createIcebergPreDmlSort(stmt, rootFragment, ctx_.getRootAnalyzer());
     }
     return rootFragment;
   }
@@ -387,9 +387,8 @@ public class Planner {
    * explicit explain level.
    * Includes the estimated resource requirements from the request if set.
    */
-  public static String getExplainString(List<PlanFragment> fragments,
-      TQueryExecRequest request, TExplainLevel explainLevel,
-      TQueryOptions options, QueryStmt queryStmt) {
+  public String getExplainString(List<PlanFragment> fragments, TQueryExecRequest request,
+      TExplainLevel explainLevel, TQueryOptions options, QueryStmt queryStmt) {
     StringBuilder str = new StringBuilder();
     boolean hasHeader = false;
 
@@ -485,6 +484,11 @@ public class Planner {
 
     // Add the blank line that indicates the end of the header
     if (hasHeader) str.append("\n");
+    if (options.isEnable_explain_calcite()) {
+      // If we are not using the CALCITE planner then plan will be just
+      // an empty string and basically append is almost noop
+      str.append(this.singleNodePlannerIntf_.calcitePlan());
+    }
 
     if (explainLevel.ordinal() < TExplainLevel.VERBOSE.ordinal()) {
       // Print the non-fragmented parallel plan.
@@ -1028,8 +1032,8 @@ public class Planner {
     inputFragment.setPlanRoot(node);
   }
 
-  public void createPreDmlSort(DmlStatementBase dmlStmt, PlanFragment inputFragment,
-      Analyzer analyzer) throws ImpalaException {
+  public void createIcebergPreDmlSort(DmlStatementBase dmlStmt,
+      PlanFragment inputFragment, Analyzer analyzer) throws ImpalaException {
     List<Expr> orderingExprs = new ArrayList<>();
 
     List<Expr> partitionKeyExprs = dmlStmt.getPartitionKeyExprs();

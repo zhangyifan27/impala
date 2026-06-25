@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from collections import defaultdict
 from datetime import datetime
 import re
@@ -24,13 +23,17 @@ from time import sleep, time
 import pytest
 
 from impala_thrift_gen.RuntimeProfile.ttypes import TRuntimeProfileFormat
+from tests.common.environ import IS_CALCITE_PLANNER
 from tests.common.impala_cluster import ImpalaCluster
 from tests.common.impala_connection import IMPALA_CONNECTION_EXCEPTION
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIfFS, SkipIfLocal, SkipIfNotHdfsMinicluster
+from tests.common.skip import (SkipIfFS, SkipIfLocal, SkipIfNotHdfsMinicluster,
+                               SkipIfCalcite)
 from tests.common.test_vector import HS2
-from tests.util.filesystem_utils import WAREHOUSE
+from tests.util.filesystem_utils import FILESYSTEM_NAME, WAREHOUSE
 from tests.util.parse_util import get_duration_us_from_str
+from tests.util.query_profile_util import (verify_profile_event_sequence,
+                                           verify_profile_node_lifecycle_events)
 
 
 class TestObservability(ImpalaTestSuite):
@@ -103,7 +106,7 @@ class TestObservability(ImpalaTestSuite):
     query = "select count(*) from functional.alltypestiny"
     result = self.client.execute(query, fetch_exec_summary=True)
     scan_idx = len(result.exec_summary) - 1
-    assert result.exec_summary[scan_idx]['operator'] == '00:SCAN HDFS'
+    assert result.exec_summary[scan_idx]['operator'] == '00:SCAN ' + FILESYSTEM_NAME
     assert result.exec_summary[scan_idx]['detail'] == 'functional.alltypestiny'
 
     # KUDU table
@@ -159,11 +162,170 @@ class TestObservability(ImpalaTestSuite):
     assert result.exec_summary[0]['peak_mem'] >= 0
     assert result.exec_summary[0]['est_peak_mem'] >= 0
 
+  def test_cancelled_nodes_in_exec_summary(self):
+    """Test nodes that don't complete are marked as cancelled"""
+    # UNION operands are cancelled when UNION reaches the limit.
+    query = """
+        with l as (select 1 from tpch.lineitem UNION ALL select 1 from tpch.customer)
+        select * from l LIMIT 10"""
+    result = self.client.execute(query, fetch_exec_summary=True)
+    # ExecSummary:
+    # Operator              #Rows  Est. #Rows  Detail
+    # ------------------------------------------------------------------
+    # F03:ROOT
+    # 03:EXCHANGE              10          10  UNPARTITIONED
+    # F02:EXCHANGE SENDER
+    # 00:UNION                 30          10
+    # |--02:SCAN HDFS           0     150.00K  tpch.customer, CANCELLED
+    # 01:SCAN HDFS          3.07K       6.00M  tpch.lineitem, CANCELLED
+    scan_op = 'SCAN ' + FILESYSTEM_NAME
+    self.verify_exec_summary_operator_details(result, {
+      '02:' + scan_op: 'tpch.customer, CANCELLED',
+      '01:' + scan_op: 'tpch.lineitem, CANCELLED',
+    })
+
+    # A more complex case with completed and cancelled nodes.
+    query = """
+        with l as (select * from tpch.lineitem UNION ALL select * from tpch.lineitem)
+        select STRAIGHT_JOIN count(*) from
+          (select * from tpch.lineitem a where l_orderkey = 1) a
+        join
+          (select * from l LIMIT 125000) b
+        on a.l_orderkey = -b.l_orderkey"""
+    result = self.client.execute(query, fetch_exec_summary=True)
+    # ExecSummary:
+    # Operator                   #Rows  Est. #Rows  Detail
+    # -----------------------------------------------------------------------
+    # F06:ROOT
+    # 10:AGGREGATE                   1           1  FINALIZE
+    # 09:EXCHANGE                    3           3  UNPARTITIONED
+    # F05:EXCHANGE SENDER
+    # 05:AGGREGATE                   3           3
+    # 04:HASH JOIN                   0           4  INNER JOIN, PARTITIONED
+    # |--08:EXCHANGE           125.00K     125.00K  HASH(-1 * l_orderkey)
+    # |  F04:EXCHANGE SENDER
+    # |  06:EXCHANGE           125.00K     125.00K  UNPARTITIONED
+    # |  F03:EXCHANGE SENDER
+    # |  01:UNION              375.00K     125.00K
+    # |  |--03:SCAN HDFS             0       6.00M  tpch.lineitem, CANCELLED
+    # |  02:SCAN HDFS          377.86K       6.00M  tpch.lineitem, CANCELLED
+    # 07:EXCHANGE                    6           4  HASH(a.l_orderkey)
+    # F00:EXCHANGE SENDER
+    # 00:SCAN HDFS                   6           4  tpch.lineitem a
+    self.verify_exec_summary_operator_details(result, {
+      '03:' + scan_op: 'tpch.lineitem, CANCELLED',
+      '02:' + scan_op: 'tpch.lineitem, CANCELLED',
+      # Calcite planner does not include the alias 'a' here.
+      '00:' + scan_op: 'tpch.lineitem' if IS_CALCITE_PLANNER else 'tpch.lineitem a',
+    })
+
+    # Test on other node types
+    query = """
+        with l as (
+          select row_number() over(order by l_orderkey) from tpch.lineitem
+          UNION ALL select 1 from tpch.customer)
+        select * from l LIMIT 10"""
+    result = self.client.execute(query, fetch_exec_summary=True)
+    # ExecSummary:
+    # Operator                #Rows  Est. #Rows  Detail
+    # --------------------------------------------------------------------
+    # F04:ROOT
+    # 07:EXCHANGE                10          10  UNPARTITIONED
+    # F03:EXCHANGE SENDER
+    # 00:UNION                   20          10
+    # |--04:SCAN HDFS             0     150.00K  tpch.customer, CANCELLED
+    # 06:EXCHANGE             2.05K       6.00M  RANDOM, CANCELLED
+    # F01:EXCHANGE SENDER
+    # 03:ANALYTIC            29.70K       6.00M  CANCELLED
+    # 05:MERGING-EXCHANGE    30.72K       6.00M  UNPARTITIONED, CANCELLED
+    # F00:EXCHANGE SENDER
+    # 02:SORT               661.05K       6.00M  CANCELLED
+    # 01:SCAN HDFS            6.00M       6.00M  tpch.lineitem
+    self.verify_exec_summary_operator_details(result, {
+      '04:' + scan_op: 'tpch.customer, CANCELLED',
+      '06:EXCHANGE': 'RANDOM, CANCELLED',
+      '03:ANALYTIC': 'CANCELLED',
+      '05:MERGING-EXCHANGE': 'UNPARTITIONED, CANCELLED',
+      '02:SORT': 'CANCELLED',
+      '01:' + scan_op: 'tpch.lineitem',
+    })
+
+    # Test limit on Subplan. As the SubplanNode reaches its limit, it finishes as expected
+    # and shouldn't be marked as CANCELLED.
+    query = """
+        select c.c_custkey, arr.o_orderkey
+        from tpch_nested_parquet.customer c, c.c_orders arr
+        limit 10"""
+    # Set num_nodes to 1 to ensure only one fragment instance is created. By default the
+    # query has 3 fragment instances. Some might be cancelled by the coordinator when it
+    # receives enough rows. Using one fragment instance ensures that when coordinator
+    # reaches the limit, the only SubplanNode has finished (also reached its limit).
+    self.client.set_configuration_option("num_nodes", 1)
+    result = self.client.execute(query, fetch_exec_summary=True)
+    self.client.clear_configuration()
+    # ExecSummary:
+    # Operator                 #Rows  Est. #Rows  Detail
+    # ------------------------------------------------------------------------------------
+    # F00:ROOT
+    # 01:SUBPLAN                 10          10
+    # |--04:NESTED LOOP JOIN      7          10  CROSS JOIN
+    # |  |--02:SINGULAR ROW SRC   0           1
+    # |  03:UNNEST                7          10  c.c_orders arr
+    # 00:SCAN HDFS                6     150.00K  tpch_nested_parquet.customer c, CANCELLED
+    self.verify_exec_summary_operator_details(result, {
+      '01:SUBPLAN': '',
+      '04:NESTED LOOP JOIN': 'CROSS JOIN',
+      '02:SINGULAR ROW SRC': '',
+      '03:UNNEST': 'c.c_orders arr',
+      '00:' + scan_op: 'tpch_nested_parquet.customer c, CANCELLED',
+    })
+
+    # Test limit on parent (UnionNode) of SubplanNode. All nodes in the SubplanNode should
+    # be marked as CANCELLED.
+    query = """
+        with l as (
+          select 1, 2
+          union all
+          select c.c_custkey, arr.o_orderkey
+            from tpch_nested_orc_def.customer c, c.c_orders arr
+        ) select * from l limit 10"""
+    result = self.client.execute(query, fetch_exec_summary=True)
+    # Operator                  #Rows  Est. #Rows  Detail
+    # ------------------------------------------------------------------------------------
+    # F02:ROOT
+    # 06:EXCHANGE                  10        10  UNPARTITIONED
+    # F01:EXCHANGE SENDER
+    # 00:UNION                     20        10  CANCELLED
+    # 02:SUBPLAN                1.02K     1.50M  CANCELLED
+    # |--05:NESTED LOOP JOIN       21        10  CROSS JOIN, CANCELLED
+    # |  |--03:SINGULAR ROW SRC     0         1  CANCELLED
+    # |  04:UNNEST                 22        10  c.c_orders arr, CANCELLED
+    # 01:SCAN HDFS              1.03K   150.00K  tpch_nested_orc_def.customer c, CANCELLED
+    self.verify_exec_summary_operator_details(result, {
+      '02:SUBPLAN': 'CANCELLED',
+      '05:NESTED LOOP JOIN': 'CROSS JOIN, CANCELLED',
+      '03:SINGULAR ROW SRC': 'CANCELLED',
+      '04:UNNEST': 'c.c_orders arr, CANCELLED',
+      '01:' + scan_op: 'tpch_nested_orc_def.customer c, CANCELLED',
+    })
+
+  def test_cancelled_markers_in_running_query(self):
+    """Test that the CANCELLED markers are not added to the summary for running queries"""
+    query = "select count(*) from functional.alltypestiny where id = sleep(1000)"
+    handle = self.execute_query_async(query)
+    while not self.client.is_finished(handle):
+      exec_summary = self.client.get_exec_summary_table(handle)
+      for row in exec_summary:
+        assert 'CANCELLED' not in row['detail'], \
+            "CANCELLED marker found in running query: " + str(row)
+      sleep(0.5)
+
   def test_query_options(self):
     """Test that the query profile shows expected non-default query options, both set
     explicitly through client and those set by planner"""
     # Set mem_limit and runtime_filter_wait_time_ms to non-default and default value.
-    query_opts = {'mem_limit': 8589934592, 'runtime_filter_wait_time_ms': 0}
+    query_opts = {'mem_limit': 8589934592, 'runtime_filter_wait_time_ms': 0,
+        'PLANNER': 'ORIGINAL'}
     profile = self.execute_query("select 1", query_opts).runtime_profile
     assert "Query Options (set by configuration): MEM_LIMIT=8589934592" in profile,\
         profile
@@ -192,6 +354,9 @@ class TestObservability(ImpalaTestSuite):
     expected_str = expected_str.format(timezone=server_timezone)
     assert expected_str in profile, profile
 
+  # IMPALA-14817
+  # Calcite planner does not populate these profile columns yet
+  @SkipIfCalcite.observability_info_missing
   def test_profile(self):
     """Test that expected fields are populated in the profile."""
     query = """select a.month, sum(a.int_col) from functional.alltypes a join
@@ -285,6 +450,33 @@ class TestObservability(ImpalaTestSuite):
     profile = self.client.get_runtime_profile(handle)
     assert "ExecSummary:" in profile, profile
 
+  def test_exec_summary_table_details_in_runtime_profile(self, unique_database):
+    """Test that the exec summary contains the correct table details"""
+    query = "create table if not exists %s.iceberg_test stored as iceberg "\
+        % unique_database + "as select * from functional_parquet.iceberg_v2_no_deletes"
+    result = self.client.execute(query, fetch_exec_summary=True)
+
+    # Assert that SCAN NODE details contain the table being read from
+    scan = result.exec_summary[1]
+    assert 'SCAN ' in scan['operator']
+    assert scan['detail'] == 'functional_parquet.iceberg_v2_no_deletes', \
+        "Table details for 'SCAN NODE' are missing in the ExecSummary"
+
+    # Assert that SINK NODE details contain the table being written to
+    writer = result.exec_summary[0]
+    assert ' WRITER' in writer['operator']
+    assert writer['detail'] == '%s.iceberg_test' % unique_database, \
+        "Table details for 'SINK NODE' are missing in the ExecSummary"
+
+    query = "update %s.iceberg_test set s = concat(s,s) where i = 3" % unique_database
+    result = self.client.execute(query, fetch_exec_summary=True)
+
+    # Assert that (MULTI DATA) SINK NODE details contain the table being written to
+    multi = result.exec_summary[0]
+    assert 'MULTI DATA SINK' in multi['operator']
+    assert multi['detail'] == '%s.iceberg_test' % unique_database, \
+        "Table details for 'MULTI DATA SINK NODE' are missing in the ExecSummary"
+
   @SkipIfLocal.multiple_impalad
   def test_profile_fragment_instances(self):
     """IMPALA-6081: Test that the expected number of fragment instances and their exec
@@ -309,6 +501,9 @@ class TestObservability(ImpalaTestSuite):
     assert results.runtime_profile.count("AGGREGATION_NODE") == 2
     assert results.runtime_profile.count("PLAN_ROOT_SINK") == 2
 
+  # IMPALA-14817
+  # Calcite planner populates different static events
+  @SkipIfCalcite.observability_info_missing
   def test_query_profile_contains_query_compilation_static_events(self):
     """Test that the expected events show up in a query profile. These lines are static
     and should appear in this exact order."""
@@ -321,14 +516,17 @@ class TestObservability(ImpalaTestSuite):
         r'Distributed plan created:']
     query = "select * from functional.alltypes"
     runtime_profile = self.execute_query(query).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_query_compilation_metadata_load_events(self,
-        cluster_properties):
+        cluster_properties, unique_database):
     """Test that the Metadata load started and finished events appear in the query
     profile when Catalog cache is evicted."""
-    invalidate_query = "invalidate metadata functional.alltypes"
-    select_query = "select * from functional.alltypes"
+    table_name = "%s.test_table" % unique_database
+    self.execute_query(
+        "create table %s as select * from functional.alltypestiny" % table_name)
+    invalidate_query = "invalidate metadata %s" % table_name
+    select_query = "select * from %s" % table_name
     self.execute_query(invalidate_query).runtime_profile
     runtime_profile = self.execute_query(select_query).runtime_profile
     # Depending on whether this is a catalog-v2 cluster or not some of the metadata
@@ -376,7 +574,7 @@ class TestObservability(ImpalaTestSuite):
         r'CatalogFetch.Tables.Misses',
         r'CatalogFetch.Tables.Requests',
         r'CatalogFetch.Tables.Time']
-    self.__verify_profile_event_sequence(load_event_regexes, runtime_profile)
+    verify_profile_event_sequence(load_event_regexes, runtime_profile)
 
   def test_query_profile_contains_query_compilation_metadata_cached_event(self):
     """Test that the Metadata cache available event appears in the query profile when
@@ -388,7 +586,7 @@ class TestObservability(ImpalaTestSuite):
     event_regexes = [r'Query Compilation:',
         r'Metadata of all .* tables cached:',
         r'Analysis finished:']
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_query_compilation_lineage_event(self):
     """Test that the lineage information appears in the profile in the right place. This
@@ -409,7 +607,7 @@ class TestObservability(ImpalaTestSuite):
     self.execute_query_expect_success(self.client, "set enable_replan=0")
     query = "select * from functional.alltypes"
     runtime_profile = self.execute_query(query).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_query_timeline_events(self):
     """Test that the expected events show up in a query profile."""
@@ -429,7 +627,7 @@ class TestObservability(ImpalaTestSuite):
     # add an extra event to the above timeline).
     query_opts = {'request_pool': 'root.no-limits'}
     runtime_profile = self.execute_query(query, query_opts).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_instance_events(self):
     """Test that /query_profile_encoded contains an event timeline for fragment
@@ -442,40 +640,20 @@ class TestObservability(ImpalaTestSuite):
                      r'ExecInternal Finished']
     query = "select count(*) from functional.alltypes"
     runtime_profile = self.execute_query(query).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_node_events(self):
     """Test that ExecNode events show up in a profile."""
-    event_regexes = [r'Node Lifecycle Event Timeline',
-                     r'Open Started',
-                     r'Open Finished',
-                     r'First Batch Requested',
-                     r'First Batch Returned',
-                     r'Last Batch Returned',
-                     r'Closed']
-    query = "select count(*) from functional.alltypes"
-    runtime_profile = self.execute_query(query).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
-
-  def __verify_profile_event_sequence(self, event_regexes, runtime_profile):
-    """Check that 'event_regexes' appear in a consecutive series of lines in
-       'runtime_profile'"""
-    event_regex_index = 0
-
-    # Check that the strings appear in the above order with no gaps in the profile.
-    for line in runtime_profile.splitlines():
-      match = re.search(event_regexes[event_regex_index], line)
-      if match is not None:
-        event_regex_index += 1
-        if event_regex_index == len(event_regexes):
-          # Found all the lines - we're done.
-          return
-      else:
-        # Haven't found the first regex yet.
-        assert event_regex_index == 0, \
-            event_regexes[event_regex_index] + " not in " + line + "\n" + runtime_profile
-    assert event_regex_index == len(event_regexes), \
-        "Didn't find all events in profile: \n" + runtime_profile
+    queries_and_opts = [
+      ("select count(*) from functional.alltypes", None),
+      ("select count(*) from functional.alltypes", {"mt_dop": 4}),
+      ("select count(*) from functional_kudu.alltypes", None),
+      ("select count(*) from functional_kudu.alltypes", {"mt_dop": 4}),
+      ("select * from functional_parquet.iceberg_query_metadata.entries", None),
+    ]
+    for query, query_opts in queries_and_opts:
+      runtime_profile = self.execute_query(query, query_opts).runtime_profile
+      verify_profile_node_lifecycle_events(runtime_profile)
 
   def test_query_profile_contains_all_events(self, unique_database):
     """Test that the expected events show up in a query profile for various queries"""
@@ -875,7 +1053,7 @@ class TestObservability(ImpalaTestSuite):
     event_regexes = [r'Per Host Number of Fragment Instances']
     query = "select count (*) from functional.alltypes"
     runtime_profile = self.execute_query(query).runtime_profile
-    self.__verify_profile_event_sequence(event_regexes, runtime_profile)
+    verify_profile_event_sequence(event_regexes, runtime_profile)
 
   def test_query_profile_contains_executor_group(self):
     """Test that the profile contains an info string with the executor group that was
@@ -1134,3 +1312,93 @@ class TestQueryStates(ImpalaTestSuite):
     """Returns true if the given 'line' is in the given 'profile'. A single line of the
     profile must exactly match the given 'line' (excluding whitespaces)."""
     return re.search(r"^\s*{0}\s*$".format(line), profile, re.M)
+
+  def test_backend_hardware_info_in_profile(self):
+    """Test for IMPALA-12191 - checks that backend hardware and OS information appears in
+    the runtime profile in both per-node profiles and aggregated summary."""
+    query = "select count(*) from functional.alltypes"
+    result = self.execute_query(query)
+    profile = result.runtime_profile
+
+    # Check that Backend CPU Info is present in aggregated summary
+    assert "Backend CPU Info:" in profile, \
+        "Backend CPU Info not found in profile:\n" + profile
+
+    # Check that Backend OS Info is present in aggregated summary
+    assert "Backend OS Info:" in profile, \
+        "Backend OS Info not found in profile:\n" + profile
+
+    # Extract and validate the aggregated CPU info line
+    cpu_info_match = re.search(r'Backend CPU Info:\s+(.+)', profile)
+    assert cpu_info_match is not None, \
+        "Could not extract Backend CPU Info from profile:\n" + profile
+    cpu_info = cpu_info_match.group(1)
+
+    # Validate format: Should contain "cores" and a count in parentheses
+    # Example: "Intel(R) Xeon(R) Silver 4215R CPU @ 3.20GHz (32 cores) (3)"
+    # Or with multiple configs: "CPU1 (28 cores) (15), CPU2 (20 cores) (3)"
+    assert "cores" in cpu_info.lower(), \
+        "Backend CPU Info should contain core count: {0}\nFull profile:\n{1}".format(
+            cpu_info, profile)
+    assert re.search(r'\(\d+\)$', cpu_info), \
+        "Backend CPU Info should end with node count in parentheses, got: {0}\n" \
+        "Full profile:\n{1}".format(cpu_info, profile)
+
+    # Extract and validate the aggregated OS info line
+    os_info_match = re.search(r'Backend OS Info:\s+(.+)', profile)
+    assert os_info_match is not None, \
+        "Could not extract Backend OS Info from profile:\n" + profile
+    os_info = os_info_match.group(1)
+
+    # Validate format: Should contain an OS name and a count in parentheses
+    # Example: "Ubuntu 22.04.5 LTS (3)"
+    # Or with multiple configs: "CentOS Linux 7 (15), Ubuntu 20.04.3 LTS (3)"
+    assert re.search(r'\(\d+\)$', os_info), \
+        "Backend OS Info should end with node count in parentheses, got: {0}\n" \
+        "Full profile:\n{1}".format(os_info, profile)
+
+    # Check that CPU and OS info appear in per-node profiles
+    assert "Per Node Profiles:" in profile, \
+        "Per Node Profiles section not found in profile:\n" + profile
+
+    # Verify that at least one per-node profile has CPU Info and OS Info
+    # Extract the Per Node Profiles section
+    per_node_match = re.search(r'Per Node Profiles:(.*?)(?=\n\s{0,2}\w|\Z)',
+                                profile, re.DOTALL)
+    assert per_node_match is not None, \
+        "Could not extract Per Node Profiles section from profile:\n" + profile
+    per_node_section = per_node_match.group(1)
+
+    # Check for CPU Info and OS Info in per-node profiles
+    assert "CPU Info:" in per_node_section, \
+        "CPU Info not found in Per Node Profiles section:\n{0}\n" \
+        "Full profile:\n{1}".format(per_node_section, profile)
+    assert "OS Info:" in per_node_section, \
+        "OS Info not found in Per Node Profiles section:\n{0}\n" \
+        "Full profile:\n{1}".format(per_node_section, profile)
+
+    # Validate the aggregation format supports multiple configurations
+    # The format is: "<config1> (<count1>), <config2> (<count2>), ..."
+    # Example heterogeneous: "Intel Xeon E5-2680 (28 cores) (15),
+    #                         Intel Xeon E5-2660 (20 cores) (3)"
+    # Example homogeneous: "Intel Xeon Silver 4215R (32 cores) (3)"
+
+    # Verify node counts are positive integers
+    cpu_node_counts = re.findall(r'\)\s*\((\d+)\)', cpu_info)
+    assert len(cpu_node_counts) > 0, \
+        "Backend CPU Info should contain at least one node count, got: {0}\n" \
+        "Full profile:\n{1}".format(cpu_info, profile)
+    for count_str in cpu_node_counts:
+      assert int(count_str) > 0, \
+          "Node count should be positive, got {0} in: {1}\nFull profile:\n{2}".format(
+              count_str, cpu_info, profile)
+
+    # Verify OS info node counts are positive integers
+    os_node_counts = re.findall(r'\((\d+)\)', os_info)
+    assert len(os_node_counts) > 0, \
+        "Backend OS Info should contain at least one node count, got: {0}\n" \
+        "Full profile:\n{1}".format(os_info, profile)
+    for count_str in os_node_counts:
+      assert int(count_str) > 0, \
+          "Node count should be positive, got {0} in: {1}\nFull profile:\n{2}".format(
+              count_str, os_info, profile)

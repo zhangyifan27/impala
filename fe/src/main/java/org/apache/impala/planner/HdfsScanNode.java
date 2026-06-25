@@ -60,7 +60,6 @@ import org.apache.impala.catalog.FileBlock;
 import org.apache.impala.catalog.FileDescriptor;
 import org.apache.impala.catalog.HdfsCompression;
 import org.apache.impala.catalog.HdfsFileFormat;
-import org.apache.impala.catalog.IcebergFileDescriptor;
 import org.apache.impala.catalog.HdfsStorageDescriptor;
 import org.apache.impala.catalog.PrimitiveType;
 import org.apache.impala.catalog.ScalarType;
@@ -82,6 +81,7 @@ import org.apache.impala.thrift.TExplainLevel;
 import org.apache.impala.thrift.TExpr;
 import org.apache.impala.thrift.TFileSplitGeneratorSpec;
 import org.apache.impala.thrift.TJsonBinaryFormat;
+import org.apache.impala.thrift.THboStatsType;
 import org.apache.impala.thrift.THdfsFileSplit;
 import org.apache.impala.thrift.THdfsScanNode;
 import org.apache.impala.thrift.THdfsStorageDescriptor;
@@ -92,6 +92,8 @@ import org.apache.impala.thrift.TPlanNodeType;
 import org.apache.impala.thrift.TQueryOptions;
 import org.apache.impala.thrift.TReplicaPreference;
 import org.apache.impala.thrift.TRuntimeFilterType;
+import org.apache.impala.thrift.TPlanNodeRun;
+import org.apache.impala.thrift.TScanInputStats;
 import org.apache.impala.thrift.TScanRange;
 import org.apache.impala.thrift.TScanRangeLocation;
 import org.apache.impala.thrift.TScanRangeLocationList;
@@ -268,7 +270,7 @@ public class HdfsScanNode extends ScanNode {
 
   // True if this is a scan that only returns partition keys and is only required to
   // return at least one of each of the distinct values of the partition keys.
-  private final boolean isPartitionKeyScan_;
+  protected final boolean isPartitionKeyScan_;
 
   // Conjuncts that can be evaluated while materializing the items (tuples) of
   // collection-typed slots. Maps from tuple descriptor to the conjuncts bound by that
@@ -331,7 +333,11 @@ public class HdfsScanNode extends ScanNode {
 
   // Slot that is used to record the Parquet metadata for the count(*) aggregation if
   // this scan node has the count(*) optimization enabled.
-  protected SlotDescriptor countStarSlot_ = null;
+  private SlotDescriptor countStarSlot_ = null;
+
+  public SlotDescriptor getCountStarSlot() {
+    return countStarSlot_;
+  }
 
   // Sampled file descriptors if table sampling is used. Grouped by partition id.
   // Initialized in checkSamplingAndCountStar();
@@ -346,6 +352,13 @@ public class HdfsScanNode extends ScanNode {
   private HdfsEstimatedMissingTableStats estimatedMissingStats_ =
       new HdfsEstimatedMissingTableStats();
 
+  public HdfsScanNode(PlanNodeId id, TupleDescriptor desc, List<Expr> conjuncts,
+      List<? extends FeFsPartition> partitions, TableRef hdfsTblRef,
+      MultiAggregateInfo aggInfo, List<Expr> partConjuncts, boolean isPartitionKeyScan) {
+    this(id, desc, conjuncts, partitions, hdfsTblRef, aggInfo, partConjuncts,
+        isPartitionKeyScan, new ScanNodeHelperImpl());
+  }
+
   /**
    * Construct a node to scan given data files into tuples described by 'desc',
    * with 'conjuncts' being the unevaluated conjuncts bound by the tuple and
@@ -354,8 +367,9 @@ public class HdfsScanNode extends ScanNode {
    */
   public HdfsScanNode(PlanNodeId id, TupleDescriptor desc, List<Expr> conjuncts,
       List<? extends FeFsPartition> partitions, TableRef hdfsTblRef,
-      MultiAggregateInfo aggInfo, List<Expr> partConjuncts, boolean isPartitionKeyScan) {
-    super(id, desc, createDisplayName(hdfsTblRef.getTable()));
+      MultiAggregateInfo aggInfo, List<Expr> partConjuncts, boolean isPartitionKeyScan,
+      ScanNodeHelper helper) {
+    super(id, desc, createDisplayName(hdfsTblRef.getTable()), helper);
     tbl_ = (FeFsTable)desc.getTable();
     conjuncts_ = conjuncts;
     partitions_ = new ArrayList<>(partitions);
@@ -421,17 +435,30 @@ public class HdfsScanNode extends ScanNode {
    * Returns true if the count(*) optimization can be applied to the query block
    * of this scan node.
    */
-  protected boolean canApplyCountStarOptimization(Analyzer analyzer,
-      Set<HdfsFileFormat> fileFormats) {
-    if (fileFormats.size() != 1) return false;
+  @Override
+  protected boolean canApplyCountStarOptimization(Analyzer analyzer) {
+    if (fileFormats_.size() != 1) return false;
     if (isFullAcidTable_) return false;
-    if (!hasParquet(fileFormats) && !hasOrc(fileFormats)) return false;
-    return canApplyCountStarOptimization(analyzer);
+    if (!hasParquet(fileFormats_) && !hasOrc(fileFormats_)) return false;
+    return super.canApplyCountStarOptimization(analyzer);
   }
 
   // Return sampledPartitions_ if not null. Otherwise, return partitions_.
   private List<FeFsPartition> getSampledOrRawPartitions() {
     return sampledPartitions_ == null ? partitions_ : sampledPartitions_;
+  }
+
+  /**
+   * Returns the total number of input rows (from HMS stats) for the selected partitions.
+   */
+  public long getNumInputRows() {
+    long sum = 0;
+    for (FeFsPartition part : getSampledOrRawPartitions()) {
+      // TODO: consider using HBO stats if numRows=-1
+      if (part.getNumRows() < 0) return -1;
+      sum += part.getNumRows();
+    }
+    return sum;
   }
 
   /**
@@ -508,12 +535,8 @@ public class HdfsScanNode extends ScanNode {
 
     populateFileFormats();
 
-    // Initialize countStarSlot_.
-    if (canApplyCountStarOptimization(analyzer, fileFormats_)) {
-      Preconditions.checkState(desc_.getPath().destTable() != null);
-      Preconditions.checkState(collectionConjuncts_.isEmpty());
-      countStarSlot_ = applyCountStarOptimization(analyzer);
-    }
+    countStarSlot_ =
+        helper_.getCountStarOptimizationDescriptor(this, analyzer, conjuncts_);
   }
 
   protected void populateFileFormats() throws ImpalaRuntimeException {
@@ -679,12 +702,19 @@ public class HdfsScanNode extends ScanNode {
       // If any child is not a literal, then nothing can be done
       if (!Expr.IS_LITERAL.apply(child)) return;
       if (isUnsupportedStatsType(child.getType())) return;
+      // Skip this child if it is NULL, since no row should match the null literal in an
+      // IN-list.
+      if (Expr.IS_NULL_LITERAL.apply(child)) continue;
       inList.add(child);
     }
     // Make a new slot descriptor, which adds it to the tuple descriptor.
     SlotDescriptor slotDesc = analyzer.getDescTbl().copySlotDescriptor(statsTuple_,
         inputSlot.getDesc());
     SlotRef slot = new SlotRef(slotDesc);
+    // We return directly to avoid creating an InPredicate without any literal, which
+    // will violate a Preconditions check when we analyze the newly instantiated
+    // InPredicate below.
+    if (inList.isEmpty()) return;
     InPredicate inPred = new InPredicate(slot, inList, inputPred.isNotIn());
     inPred.analyzeNoThrow(analyzer);
     statsConjuncts_.add(inPred);
@@ -1484,6 +1514,7 @@ public class HdfsScanNode extends ScanNode {
     int partitionHash = partitionLocation.hashCode();
     TFileSplitGeneratorSpec splitSpec = new TFileSplitGeneratorSpec(fileDesc.toThrift(),
         maxBlockSize, splittable, partition.getId(), partitionHash, isFooterOnly);
+    decorateSplitSpec(fileDesc, splitSpec);
     scanRangeSpecs_.addToSplit_specs(splitSpec);
     long scanRangeBytes = Math.min(maxBlockSize, fileDesc.getFileLength());
     if (splittable && !isPartitionKeyScan_) {
@@ -1567,10 +1598,7 @@ public class HdfsScanNode extends ScanNode {
         hdfsFileSplit.setIs_encrypted(fileDesc.getIsEncrypted());
         hdfsFileSplit.setIs_erasure_coded(fileDesc.getIsEc());
         scanRange.setHdfs_file_split(hdfsFileSplit);
-        if (fileDesc instanceof IcebergFileDescriptor) {
-          scanRange.setFile_metadata(
-              ((IcebergFileDescriptor)fileDesc).getFbFileMetadata().getByteBuffer());
-        }
+        decorateScanRange(fileDesc, scanRange);
         TScanRangeLocationList scanRangeLocations = new TScanRangeLocationList();
         scanRangeLocations.scan_range = scanRange;
         scanRangeLocations.locations = locations;
@@ -1593,6 +1621,17 @@ public class HdfsScanNode extends ScanNode {
 
     return new Pair<Boolean, Long>(fileDescMissingDiskIds, fileMaxScanRangeBytes);
   }
+
+  protected void decorateScanRange(FileDescriptor fileDesc, TScanRange scanRange) {}
+
+  /**
+   * Called from generateScanRangeSpecs() to allow subclasses to attach extra metadata
+   * to the split spec before it is added to scanRangeSpecs_.split_specs. The default
+   * implementation is a no-op. IcebergScanNode overrides this to attach deletion
+   * vectors so they are available to the backend after spec expansion.
+   */
+  protected void decorateSplitSpec(FileDescriptor fileDesc,
+      TFileSplitGeneratorSpec splitSpec) {}
 
   /**
    * Computes the average row size, input and output cardinalities, and estimates the
@@ -1703,9 +1742,8 @@ public class HdfsScanNode extends ScanNode {
       inputCardinality_ = totalFiles;
       cardinality_ = totalFiles;
     }
-    if (LOG.isTraceEnabled()) {
-      LOG.trace("HdfsScan: cardinality_=" + Long.toString(cardinality_));
-    }
+    tryUpdateCardinalityFromHbo(analyzer);
+    LOG.info("HdfsScan: cardinality_={}", cardinality_);
   }
 
   /**
@@ -1853,10 +1891,59 @@ public class HdfsScanNode extends ScanNode {
     Preconditions.checkState(false, "Unexpected use of old toThrift() signature.");
   }
 
+  /**
+   * Generates an unhashed HBO key string for this scan node.
+   * This key string can be incorporated by parent nodes into their HBO keys.
+   */
+  @Override
+  public String generateHboKeyString(THboStatsType statsType,
+      CanonicalizationStrategy strategy) {
+    // Start with stats type prefix
+    StringBuilder sb = new StringBuilder(statsType.name()).append(":ScanNode:");
+    // Use the full path including collection columns if available
+    if (desc_.getPath() != null) {
+      sb.append(desc_.getPath().toString());
+    } else {
+      sb.append(tbl_.getFullName());
+    }
+    sb.append("|");
+
+    // Canonicalize partition conjuncts and regular conjuncts.
+    List<String> partConjStrings =
+        ExprCanonicalizer.canonicalizeScanConjuncts(partitionConjuncts_, tbl_, strategy);
+    List<String> conjStrings =
+        ExprCanonicalizer.canonicalizeScanConjuncts(conjuncts_, tbl_, strategy);
+
+    for (String s: partConjStrings) {
+      sb.append(s).append("|");
+      LOG.trace("HBO PARTITION CONJUNCT STR ({}, {}): {}", statsType, strategy, s);
+    }
+    for (String s: conjStrings) {
+      sb.append(s).append("|");
+      LOG.trace("HBO CONJUNCT STR ({}, {}): {}", statsType, strategy, s);
+    }
+
+    if (limit_ != -1) {
+      sb.append("LIMIT:").append(limit_);
+    }
+    return sb.toString();
+  }
+
+  @Override
+  public void appendScanInputStats(TPlanNodeRun execStats) {
+    TScanInputStats scanStats = new TScanInputStats();
+    scanStats.setInput_rows(getNumInputRows());
+    scanStats.setCatalog_version(tbl_.getCatalogVersion());
+    scanStats.setNum_input_files(sumValues(totalFilesPerFs_));
+    scanStats.setInput_file_size(sumValues(totalBytesPerFs_));
+    execStats.addToScan_input_stats(scanStats);
+  }
+
   @Override
   protected void toThrift(TPlanNode msg, ThriftSerializationCtx serialCtx) {
     msg.hdfs_scan_node = new THdfsScanNode(serialCtx.translateTupleId(
         desc_.getId()).asInt(), new HashSet<>());
+    populateHboThriftFields(msg, serialCtx);
     // Register this scan node as an input for tuple caching.
     serialCtx.registerInputScanNode(this);
     if (replicaPreference_ != null) {

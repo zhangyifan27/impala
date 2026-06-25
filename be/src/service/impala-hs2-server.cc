@@ -25,8 +25,6 @@
 #include <boost/algorithm/string/join.hpp>
 #include <boost/bind.hpp>
 #include <boost/unordered_set.hpp>
-#include <gperftools/heap-profiler.h>
-#include <gperftools/malloc_extension.h>
 #include <gtest/gtest.h>
 #include <gutil/strings/substitute.h>
 
@@ -295,7 +293,7 @@ Status ImpalaServer::TExecuteStatementReqToTQueryContext(
   // pool options.
   AddPoolConfiguration(query_ctx, ~set_query_options_mask);
   VLOG_QUERY << "TClientRequest.queryOptions: "
-             << ThriftDebugString(query_ctx->client_request.query_options);
+             << DebugQueryOptions(query_ctx->client_request.query_options);
   return Status::OK();
 }
 
@@ -344,6 +342,7 @@ void ImpalaServer::OpenSession(TOpenSessionResp& return_val,
   }
   state->network_address = ThriftServer::GetThreadConnectionContext()->network_address;
   state->http_origin = ThriftServer::GetThreadConnectionContext()->http_origin;
+  state->http_request_id = ThriftServer::GetThreadConnectionContext()->http_request_id;
   state->last_accessed_ms = UnixMillis();
   // request.client_protocol is not guaranteed to be a valid TProtocolVersion::type, so
   // loading it can cause undefined behavior. Instead, we copy it to a value of the
@@ -385,8 +384,10 @@ void ImpalaServer::OpenSession(TOpenSessionResp& return_val,
         // If the current user is a valid proxy user, he/she can optionally perform
         // authorization requests on behalf of another user. This is done by setting
         // the 'impala.doas.user' Hive Server 2 configuration property.
-        // Note: The 'impala.doas.user' configuration overrides the user specified
-        // in the 'doAs' request parameter, which can be specified for hs2-http transport.
+        if (!state->do_as_user.empty()) {
+          HS2_RETURN_ERROR(return_val, "Cannot set 'impala.doas.user' configuration "
+            "property when 'doAs' query parameter is set.", SQLSTATE_GENERAL_ERROR);
+        }
         state->do_as_user = v.second;
         Status status = AuthorizeProxyUser(state->connected_user, state->do_as_user);
         HS2_RETURN_IF_ERROR(return_val, status, SQLSTATE_GENERAL_ERROR);
@@ -1356,10 +1357,14 @@ void ImpalaServer::GetRuntimeProfile(
   return_val.status.__set_statusCode(thrift::TStatusCode::SUCCESS_STATUS);
 }
 
+static void SetNotImplementedError(thrift::TStatus& status) {
+  status.__set_statusCode(thrift::TStatusCode::ERROR_STATUS);
+  status.__set_errorMessage("Not implemented");
+}
+
 void ImpalaServer::GetDelegationToken(TGetDelegationTokenResp& return_val,
     const TGetDelegationTokenReq& req) {
-  return_val.status.__set_statusCode(thrift::TStatusCode::ERROR_STATUS);
-  return_val.status.__set_errorMessage("Not implemented");
+  SetNotImplementedError(return_val.status);
 }
 
 void ImpalaServer::GetBackendConfig(TGetBackendConfigResp& return_val,
@@ -1425,14 +1430,12 @@ void ImpalaServer::GetExecutorMembership(
 
 void ImpalaServer::CancelDelegationToken(TCancelDelegationTokenResp& return_val,
     const TCancelDelegationTokenReq& req) {
-  return_val.status.__set_statusCode(thrift::TStatusCode::ERROR_STATUS);
-  return_val.status.__set_errorMessage("Not implemented");
+  SetNotImplementedError(return_val.status);
 }
 
 void ImpalaServer::RenewDelegationToken(TRenewDelegationTokenResp& return_val,
     const TRenewDelegationTokenReq& req) {
-  return_val.status.__set_statusCode(thrift::TStatusCode::ERROR_STATUS);
-  return_val.status.__set_errorMessage("Not implemented");
+  SetNotImplementedError(return_val.status);
 }
 
 void ImpalaServer::AddSessionToConnection(
@@ -1479,5 +1482,29 @@ void ImpalaServer::PingImpalaHS2Service(TPingImpalaHS2ServiceResp& return_val,
   }
   return_val.__set_timestamp(MonotonicStopWatch::Now());
   VLOG_RPC << "PingImpalaHS2Service(): return_val=" << ThriftDebugString(return_val);
+}
+
+void ImpalaServer::GetQueryId(TGetQueryIdResp& return_val,
+    const TGetQueryIdReq& request) {
+  VLOG_QUERY << "GetQueryId(): request=" << RedactedDebugString(request);
+  TUniqueId query_id, op_secret;
+  Status status = THandleIdentifierToTUniqueId(
+      request.operationHandle.operationId, &query_id, &op_secret);
+  return_val.__set_queryId(status.ok() ? PrintId(query_id) : "");
+}
+
+void ImpalaServer::SetClientInfo(TSetClientInfoResp& return_val,
+    const TSetClientInfoReq& request) {
+  SetNotImplementedError(return_val.status);
+}
+
+void ImpalaServer::UploadData(TUploadDataResp& return_val,
+    const TUploadDataReq& request) {
+  SetNotImplementedError(return_val.status);
+}
+
+void ImpalaServer::DownloadData(TDownloadDataResp& return_val,
+    const TDownloadDataReq& request) {
+  SetNotImplementedError(return_val.status);
 }
 }

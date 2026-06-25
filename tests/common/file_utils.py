@@ -19,7 +19,6 @@
 # and other functions used for checking for strings in files and
 # directories.
 
-from __future__ import absolute_import, division, print_function
 import os
 import re
 import shutil
@@ -39,8 +38,8 @@ def create_iceberg_table_from_directory(impala_client, unique_database, table_na
   if not warehouse_prefix and unique_database:
     warehouse_prefix = os.getenv("DEFAULT_FS", WAREHOUSE_PREFIX)
 
-  # Only orc and parquet tested/supported
-  assert file_format == "orc" or file_format == "parquet"
+  # Only orc, parquet, and avro tested/supported
+  assert file_format in ["orc", "parquet", "avro"]
 
   table_location = os.path.expandvars(table_location)
   local_dir = os.path.join(table_location, table_name)
@@ -57,11 +56,11 @@ def create_iceberg_table_from_directory(impala_client, unique_database, table_na
   rewrite_metadata(warehouse_prefix, unique_database, os.path.join(local_dir, 'metadata'))
 
   # Put the directory in the database's directory (not the table directory)
-  hdfs_parent_dir = os.path.join(get_fs_path("/test-warehouse"), unique_database)
+  hdfs_parent_dir = os.path.join(get_fs_path("/test-warehouse"), unique_database + ".db")
   hdfs_dir = os.path.join(hdfs_parent_dir, table_name)
 
   # Purge existing files if any
-  check_call(['hdfs', 'dfs', '-rm', '-f', '-r', hdfs_dir])
+  check_call(['hdfs', 'dfs', '-rm', '-skipTrash', '-f', '-r', hdfs_dir])
 
   # Note: -d skips a staging copy
   check_call(['hdfs', 'dfs', '-mkdir', '-p', hdfs_parent_dir])

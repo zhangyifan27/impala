@@ -457,7 +457,7 @@ set(CLANG_INCLUDE_FLAGS
   "-I${AVRO_INCLUDE_DIR}"
   "-I${ORC_INCLUDE_DIR}"
   # Include Boost as a system directory to suppress warnings from headers.
-  "-isystem${BOOST_INCLUDEDIR}"
+  "-isystem${Boost_INCLUDE_DIRS}"
   "-I${KUDU_CLIENT_INCLUDE_DIR}"
   # Required so that jni.h can be found during Clang compilation
   "-I${JAVA_INCLUDE_PATH}"
@@ -534,6 +534,7 @@ set (IMPALA_LIBS
   Catalog
   CodeGen
   Common
+  StatusMinimal
   Exec
   ExecIr
   ExecAvro
@@ -549,6 +550,7 @@ set (IMPALA_LIBS
   ExecText
   ExecIcebergMetadata
   ExecPaimon
+  ExecPuffin
   Exprs
   ExprsIr
   ExprsGeoIr
@@ -666,6 +668,7 @@ if (BUILD_SHARED_LIBS)
     ImpalaThrift
     GlobalFlags
     Common
+    StatusMinimal
     Udf
     WorkloadMgmt
     )
@@ -693,7 +696,6 @@ set (IMPALA_DEPENDENCIES
   krb5
   libev
   libunwind
-  pprof
   breakpad_client
   hdfs
   zlib
@@ -743,17 +745,19 @@ if (ENABLE_CODE_COVERAGE)
 endif()
 
 # The above link list does not include tcmalloc. This is because the Impala JVM support
-# libraries (libfesupport, libloggingsupport) cannot use tcmalloc in all cases. When they
-# are started up by the FE (for tests) the jvm has already made allocations before
-# tcmalloc can be loaded. In all other binaries, we can use tcmalloc except the address
-# sanitizer build. Address sanitizer is incompatible with tcmalloc (they both intercept
-# malloc/free)
-set (IMPALA_LINK_LIBS_NO_TCMALLOC ${IMPALA_LINK_LIBS})
-if (NOT "${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER" AND
-    NOT "${CMAKE_BUILD_TYPE}" STREQUAL "TSAN" AND
-    NOT "${CMAKE_BUILD_TYPE}" STREQUAL "TSAN_FULL")
-  set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS} tcmallocstatic)
-  set (UNIFIED_TEST_LINK_LIBS ${UNIFIED_TEST_LINK_LIBS} tcmallocstatic)
+# library (libfesupport) cannot use tcmalloc in all cases. When it is started up by the
+# FE (for tests) the jvm has already made allocations before tcmalloc can be loaded. In
+# all other binaries, we can use tcmalloc except the address sanitizer build. Address
+# sanitizer is incompatible with tcmalloc (they both intercept malloc/free)
+set (IMPALA_LINK_LIBS_NO_TCMALLOC ${IMPALA_LINK_LIBS} MallocUtilLibc)
+if ("${CMAKE_BUILD_TYPE}" STREQUAL "ADDRESS_SANITIZER" OR
+    "${CMAKE_BUILD_TYPE}" STREQUAL "TSAN" OR
+    "${CMAKE_BUILD_TYPE}" STREQUAL "TSAN_FULL")
+  set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS} MallocUtilSanitizer)
+  set (UNIFIED_TEST_LINK_LIBS ${UNIFIED_TEST_LINK_LIBS} MallocUtilSanitizer)
+else()
+  set (IMPALA_LINK_LIBS ${IMPALA_LINK_LIBS} MallocUtilGperftools)
+  set (UNIFIED_TEST_LINK_LIBS ${UNIFIED_TEST_LINK_LIBS} MallocUtilGperftools)
 endif()
 
 # When we link statically, we need to replace the static libhdfs.a with the dynamic

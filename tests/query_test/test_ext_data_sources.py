@@ -15,10 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-
-import re
-
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.test_dimensions import (create_uncompressed_text_dimension,
     create_exec_option_dimension)
@@ -39,7 +35,7 @@ class TestExtDataSources(ImpalaTestSuite):
     """Extracts the table properties mapping from the output of DESCRIBE FORMATTED"""
     return self._get_properties('Table Parameters:', table_name)
 
-  def test_verify_jdbc_table_properties(self, vector):
+  def test_verify_jdbc_table_properties(self):
     jdbc_tbl_name = "functional.alltypes_jdbc_datasource"
     properties = self._get_tbl_properties(jdbc_tbl_name)
     # Verify table properties specific for external JDBC table

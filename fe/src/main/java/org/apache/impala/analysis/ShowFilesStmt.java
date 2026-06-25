@@ -37,7 +37,6 @@ import org.apache.impala.catalog.paimon.FeShowFileStmtSupport;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.IcebergPartitionPredicateConverter;
 import org.apache.impala.common.IcebergPredicateConverter;
-import org.apache.impala.common.ImpalaException;
 
 import org.apache.impala.thrift.TShowFilesParams;
 import org.apache.impala.thrift.TTableName;
@@ -147,12 +146,24 @@ public class ShowFilesStmt extends StatementBase implements SingleTableStmt {
       expr = rewriter.rewrite(expr);
       expr.analyze(analyzer);
       analyzer.getConstantFolder().rewrite(expr, analyzer);
-      try {
-        icebergPartitionExprs.add(converter.convert(expr));
-      } catch (ImpalaException e) {
-        throw new AnalysisException(
-            "Invalid partition filtering expression: " + expr.toSql(), e);
+
+      IcebergPredicateConverter.ConverterResult result = converter.convert(expr);
+
+      if (result.isFailed()) {
+        throw new AnalysisException(String.format(
+            "Invalid partition filtering expression: %s. %s",
+            expr.toSql(), result.getErrorMessage()));
       }
+
+      if (result.isPartiallyConverted()) {
+        throw new AnalysisException(String.format(
+            "Predicate '%s' can only be partially converted to Iceberg expression: " +
+            "'%s'. Partially converted predicates are not allowed in SHOW FILES as " +
+            "they could show more files than intended. Use a fully convertible " +
+            "predicate instead.", expr.toSql(), result.getIcebergExpression()));
+      }
+
+      icebergPartitionExprs.add(result.getIcebergExpression());
     }
 
     try (CloseableIterable<FileScanTask> fileScanTasks = IcebergUtil.planFiles(table,

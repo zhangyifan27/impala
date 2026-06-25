@@ -28,10 +28,10 @@ import com.google.common.collect.Range;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.directory.server.annotations.CreateLdapServer;
 import org.apache.directory.server.annotations.CreateTransport;
@@ -96,22 +96,26 @@ public class LdapImpalaShellTest {
    */
   protected boolean pythonSupportsSSLContext() throws Exception {
     // Runs the following command:
-    // python -c "import ssl; print hasattr(ssl, 'create_default_context')"
+    // python3 -c "import ssl; print hasattr(ssl, 'create_default_context')"
     String[] cmd = {
-        "python", "-c", "import ssl; print(hasattr(ssl, 'create_default_context'))"};
+        "python3", "-c", "import ssl; print(hasattr(ssl, 'create_default_context'))"};
     return Boolean.parseBoolean(
         RunShellCommand.Run(cmd, true, "", "").stdout.replace("\n", ""));
   }
 
   /**
-   * Returns list of transport protocols: "beeswax", "hs2" is always available,
+   * Returns list of transport protocols: "hs2" is always available,
    * "hs2-http" is not available on older version of python.
    */
   protected List<String> getProtocolsToTest() throws Exception {
-    List<String> protocolsToTest = Arrays.asList("beeswax", "hs2");
+    List<String> protocolsToTest = new ArrayList<>();
+    protocolsToTest.add("hs2");
+    if ("true".equals(System.getenv("ENABLE_BEESWAX"))) {
+      protocolsToTest.add("beeswax");
+    }
     if (pythonSupportsSSLContext()) {
       // http transport tests will fail with older python versions (IMPALA-8873)
-      protocolsToTest = Arrays.asList("beeswax", "hs2", "hs2-http");
+      protocolsToTest.add("hs2-http");
     }
     return protocolsToTest;
   }

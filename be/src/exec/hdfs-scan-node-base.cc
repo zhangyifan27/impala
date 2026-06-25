@@ -264,10 +264,11 @@ Status HdfsScanPlanNode::ProcessScanRangesAndInitSharedState(FragmentState* stat
     for (const ScanRangeParamsPB& params : ranges->second.scan_ranges()) {
       DCHECK(params.scan_range().has_hdfs_file_split());
       const HdfsFileSplitPB& split = params.scan_range().hdfs_file_split();
-      const org::apache::impala::fb::FbFileMetadata* file_metadata = nullptr;
+      const org::apache::impala::fb::FbSplitFileMetadata* file_metadata = nullptr;
       if (params.scan_range().has_file_metadata()) {
-        file_metadata = flatbuffers::GetRoot<org::apache::impala::fb::FbFileMetadata>(
-            params.scan_range().file_metadata().c_str());
+        file_metadata =
+            flatbuffers::GetRoot<org::apache::impala::fb::FbSplitFileMetadata>(
+                params.scan_range().file_metadata().c_str());
       }
       HdfsPartitionDescriptor* partition_desc =
           hdfs_table_->GetPartition(split.partition_id());
@@ -323,6 +324,9 @@ Status HdfsScanPlanNode::ProcessScanRangesAndInitSharedState(FragmentState* stat
               break;
             case FbIcebergDataFileFormat::FbIcebergDataFileFormat_AVRO:
               file_desc->file_format = THdfsFileFormat::AVRO;
+              break;
+            case FbIcebergDataFileFormat::FbIcebergDataFileFormat_PUFFIN:
+              file_desc->file_format = THdfsFileFormat::PUFFIN;
               break;
             default:
               return Status(Substitute(
@@ -908,10 +912,11 @@ Status HdfsScanNodeBase::CreateAndOpenScannerHelper(HdfsPartitionDescriptor* par
   DCHECK(context != nullptr);
   DCHECK(scanner->get() == nullptr);
 
-  const FbFileMetadata* file_metadata = context->GetStream(0)->file_desc()->file_metadata;
+  const FbSplitFileMetadata* file_metadata =
+      context->GetStream(0)->file_desc()->file_metadata;
   if (file_metadata) {
     // Iceberg tables can have different file format for each data file:
-    const FbIcebergMetadata* ice_metadata = file_metadata->iceberg_metadata();
+    const FbIcebergSplitMetadata* ice_metadata = file_metadata->iceberg_metadata();
     DCHECK(ice_metadata != nullptr);
     switch (ice_metadata->file_format()) {
       case FbIcebergDataFileFormat::FbIcebergDataFileFormat_PARQUET:
@@ -1125,19 +1130,15 @@ void HdfsScanPlanNode::ComputeSlotMaterializationOrder(
 bool HdfsScanPlanNode::HasVirtualColumnInTemplateTuple() const {
   for (SlotDescriptor* sd : virtual_column_slots_) {
     DCHECK(sd->IsVirtual());
-    if (sd->virtual_column_type() == TVirtualColumnType::INPUT_FILE_NAME) {
-      return true;
-    } else if (sd->virtual_column_type() == TVirtualColumnType::FILE_POSITION) {
+    if (sd->virtual_column_type() == TVirtualColumnType::FILE_POSITION) {
       // We return false at the end of the function if there are no virtual
       // columns in the template tuple.
       continue;
-    } else if (sd->virtual_column_type() == TVirtualColumnType::PARTITION_SPEC_ID) {
-      return true;
-    } else if (sd->virtual_column_type() ==
-        TVirtualColumnType::ICEBERG_PARTITION_SERIALIZED) {
-      return true;
-    } else if (sd->virtual_column_type() ==
-        TVirtualColumnType::ICEBERG_DATA_SEQUENCE_NUMBER) {
+    } else if (sd->virtual_column_type() == TVirtualColumnType::INPUT_FILE_NAME ||
+        sd->virtual_column_type() == TVirtualColumnType::PARTITION_SPEC_ID ||
+        sd->virtual_column_type() == TVirtualColumnType::ICEBERG_PARTITION_SERIALIZED ||
+        sd->virtual_column_type() == TVirtualColumnType::ICEBERG_DATA_SEQUENCE_NUMBER ||
+        sd->virtual_column_type() == TVirtualColumnType::ICEBERG_FIRST_ROW_ID) {
       return true;
     } else {
       // Adding DCHECK here so we don't forget to update this when adding new virtual

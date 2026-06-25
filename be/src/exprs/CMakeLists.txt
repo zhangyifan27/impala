@@ -31,6 +31,7 @@ add_library(ExprsIr
   ai-functions-ir.cc
   bit-byte-functions-ir.cc
   cast-functions-ir.cc
+  collection-functions-ir.cc
   compound-predicates-ir.cc
   conditional-functions-ir.cc
   datasketches-functions-ir.cc
@@ -97,6 +98,7 @@ add_library(ExprsTests STATIC
   expr-test.cc
   iceberg-functions-test.cc
   timezone_db-test.cc
+  like-predicate-test.cc
 )
 add_dependencies(ExprsTests gen-deps)
 
@@ -108,6 +110,7 @@ ADD_UNIFIED_BE_LSAN_TEST(expr-test "Instantiations/ExprTest.*")
 ADD_BE_LSAN_TEST(expr-codegen-test)
 ADD_UNIFIED_BE_LSAN_TEST(timezone_db-test
  "TimezoneDbNamesTest.*:TimezoneDbLoadAliasTest.*:TimezoneDbLoadZoneInfoTest.*")
+ADD_UNIFIED_BE_LSAN_TEST(like-predicate-test "TestLikePredicate.*")
 
 # expr-codegen-test includes test IR functions
 COMPILE_TO_IR(expr-codegen-test.cc)

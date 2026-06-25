@@ -153,13 +153,15 @@ public class DistributedPlanner {
           ctx_.getNextFragmentId(), root, DataPartition.UNPARTITIONED);
     } else if (root instanceof CardinalityCheckNode) {
       result = createCardinalityCheckNodeFragment((CardinalityCheckNode) root, childFragments);
-    } else if (root instanceof IcebergDeleteNode) {
+    } else if (root instanceof IcebergDeleteJoinNode) {
       Preconditions.checkState(childFragments.size() == 2);
-      result = createIcebergDeleteFragment((IcebergDeleteNode) root,
+      result = createIcebergDeleteFragment((IcebergDeleteJoinNode) root,
           childFragments.get(0), childFragments.get(1));
     } else if (root instanceof IcebergMergeNode) {
       childFragments.get(0).addPlanRoot(root);
       result = childFragments.get(0);
+    } else if (root instanceof UnpivotNode) {
+      result = createUnpivotNodeFragment((UnpivotNode) root, childFragments);
     } else {
       throw new InternalException("Cannot create plan fragment for this node type: "
           + root.getExplainString(ctx_.getQueryOptions()));
@@ -207,22 +209,27 @@ public class DistributedPlanner {
 
     if (dmlStmt.hasNoShuffleHint() && !enforceHdfsWriterLimit) return inputFragment;
 
-    List<Expr> partitionExprs = new ArrayList<>(dmlStmt.getPartitionKeyExprs());
+    List<Expr> shuffleExprs = new ArrayList<>(dmlStmt.getShuffleExprs());
+    boolean enforceShuffle = !shuffleExprs.isEmpty();
+    // If shuffle exprs are not set, fall back to partition key exprs for the exchange.
+    List<Expr> exchangeExprs = enforceShuffle
+        ? shuffleExprs
+        : new ArrayList<>(dmlStmt.getPartitionKeyExprs());
     // Ignore constants for the sake of partitioning.
-    Expr.removeConstants(partitionExprs);
+    Expr.removeConstants(exchangeExprs);
 
     // Do nothing if the input fragment is already appropriately partitioned. TODO: handle
     // Kudu tables here (IMPALA-5254).
     DataPartition inputPartition = inputFragment.getDataPartition();
-    if (!partitionExprs.isEmpty()
+    if (!exchangeExprs.isEmpty()
         && analyzer.setsHaveValueTransfer(
-            inputPartition.getPartitionExprs(), partitionExprs, true)
+            inputPartition.getPartitionExprs(), exchangeExprs, true)
         && !(dmlStmt.getTargetTable() instanceof FeKuduTable)
         && !enforceHdfsWriterLimit) {
       return inputFragment;
     }
 
-    long numPartitions = getNumDistinctValues(partitionExprs);
+    long numPartitions = getNumDistinctValues(exchangeExprs);
     int maxHdfsWriters = analyzer.getQueryOptions().getMax_fs_writers();
     // We also consider fragments containing union nodes along with scan fragments
     // (leaf fragments) since they are either a part of those scan fragments or are
@@ -244,7 +251,7 @@ public class DistributedPlanner {
           inputFragment.getNumNodes(), analyzer.getMaxParallelismPerNode());
       int costBasedMaxWriter = minInstances;
 
-      boolean isPartitioned = !partitionExprs.isEmpty();
+      boolean isPartitioned = !exchangeExprs.isEmpty();
       PlanNode root = inputFragment.getPlanRoot();
       if (root.getCardinality() > -1 && root.getAvgRowSize() > -1) {
         // Both cardinality and avg row size is known.
@@ -289,14 +296,17 @@ public class DistributedPlanner {
       }
     }
 
-    // Make a cost-based decision only if no user hint was supplied.
-    if (!dmlStmt.hasShuffleHint()) {
+    // Make a cost-based decision only if no user hint was supplied and the
+    // shuffle is not enforced (non-empty shuffle exprs mean the statement requires
+    // a shuffle for correctness, e.g. Iceberg V3 tables need to shuffle to guarantee
+    // one Deletion Vector per data file).
+    if (!dmlStmt.hasShuffleHint() && !enforceShuffle) {
       if (dmlStmt.getTargetTable() instanceof FeKuduTable) {
         // If the table is unpartitioned or all of the partition exprs are constants,
         // don't insert the exchange.
         // TODO: make a more sophisticated decision here for partitioned tables and when
         // we have info about tablet locations.
-        if (partitionExprs.isEmpty()) return inputFragment;
+        if (exchangeExprs.isEmpty()) return inputFragment;
       } else if (!enforceHdfsWriterLimit || !hasHdfsScanORUnion
           || (expectedNumInputInstance <= maxHdfsWriters)) {
         // Only consider skipping the addition of an exchange node if
@@ -322,10 +332,10 @@ public class DistributedPlanner {
         // check if it is distributed across all nodes. If so, don't repartition.
         // TODO: If input fragment has ScanNode leave(s), its inputPartitions can be
         // empty and numInputPartitions=1. But the scanned table(s) might be a
-        // partitioned table(s) that superset of partitionExprs. Repartition (shuffling)
+        // partitioned table(s) that superset of exchangeExprs. Repartition (shuffling)
         // might not needed in that case, but skipping repartition can risk producing
         // small files.
-        if (Expr.isSubset(inputPartition.getPartitionExprs(), partitionExprs)) {
+        if (Expr.isSubset(inputPartition.getPartitionExprs(), exchangeExprs)) {
           long numInputPartitions =
               getNumDistinctValues(inputPartition.getPartitionExprs());
           if (numInputPartitions >= inputInstances) { return inputFragment; }
@@ -350,7 +360,7 @@ public class DistributedPlanner {
     exchNode.init(analyzer);
     Preconditions.checkState(exchNode.hasValidStats());
     DataPartition partition;
-    if (partitionExprs.isEmpty()) {
+    if (exchangeExprs.isEmpty()) {
       if (enforceHdfsWriterLimit
           && inputFragment.getDataPartition().getType() == TPartitionType.RANDOM) {
         // This ensures the parallelism of the writers is maintained while maintaining
@@ -364,7 +374,7 @@ public class DistributedPlanner {
       partition = DataPartition.kuduPartitioned(
           KuduUtil.createPartitionExpr((InsertStmt)dmlStmt, ctx_.getRootAnalyzer()));
     } else {
-      partition = DataPartition.hashPartitioned(partitionExprs);
+      partition = DataPartition.hashPartitioned(exchangeExprs);
     }
     PlanFragment fragment =
         new PlanFragment(ctx_.getNextFragmentId(), exchNode, partition);
@@ -677,7 +687,7 @@ public class DistributedPlanner {
    * Similarly to a BROADCAST join, the left child of the join is in the same fragment
    * with the join itself, while the right child is in a separate fragment.
    */
-  private PlanFragment createIcebergDeleteFragment(IcebergDeleteNode node,
+  private PlanFragment createIcebergDeleteFragment(IcebergDeleteJoinNode node,
       PlanFragment leftChildFragment, PlanFragment rightChildFragment)
           throws ImpalaException {
     Preconditions.checkState(node.getEqJoinConjuncts().size() == 2);
@@ -918,6 +928,17 @@ public class DistributedPlanner {
     // (whereas selectNode.child[0] would point to the original child)
     selectNode.setChild(0, childFragment.getPlanRoot());
     childFragment.setPlanRoot(selectNode);
+    return childFragment;
+  }
+
+  private PlanFragment createUnpivotNodeFragment(UnpivotNode unpivotNode,
+      List<PlanFragment> childFragments) {
+    Preconditions.checkState(unpivotNode.getChildren().size() == childFragments.size());
+    PlanFragment childFragment = childFragments.get(0);
+    // set the child explicitly, an ExchangeNode might have been inserted
+    // (whereas unpivotNode.child[0] would point to the original child)
+    unpivotNode.setChild(0, childFragment.getPlanRoot());
+    childFragment.setPlanRoot(unpivotNode);
     return childFragment;
   }
 

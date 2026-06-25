@@ -29,6 +29,7 @@ include "CatalogObjects.thrift"
 include "Data.thrift"
 include "ExecStats.thrift"
 include "Exprs.thrift"
+include "HBO.thrift"
 include "Types.thrift"
 include "ExternalDataSource.thrift"
 include "ResourceProfile.thrift"
@@ -58,6 +59,7 @@ enum TPlanNodeType {
   SYSTEM_TABLE_SCAN_NODE = 21
   ICEBERG_MERGE_NODE = 22
   PAIMON_SCAN_NODE=23
+  UNPIVOT_NODE=24
 }
 
 // phases of an execution node
@@ -137,6 +139,12 @@ enum TRuntimeFilterType {
   BLOOM = 0
   MIN_MAX = 1
   IN_LIST = 2
+}
+
+enum TPlannerType {
+  ORIGINAL = 0
+  CALCITE = 1
+  NONE = 2
 }
 
 // The level of filtering of enabled min/max filters to be applied to Parquet scan nodes.
@@ -280,6 +288,11 @@ struct TFileSplitGeneratorSpec {
   // True if only footer range (the last block in file) is needed.
   // If True, is_splittable must also be True as well.
   6: required bool is_footer_only
+
+  // FlatBuffer-encoded FbIcebergDeletionVector for the data file covered by this spec.
+  // Set only for Iceberg data files that have an associated deletion vector.
+  // Propagated to every TScanRange generated from this spec by the backend coordinator.
+  7: optional binary iceberg_deletion_vector
 }
 
 // Specification of an individual data range which is held in its entirety
@@ -291,6 +304,8 @@ struct TScanRange {
   3: optional binary kudu_scan_token
   4: optional binary file_metadata
   5: optional bool is_system_scan
+  6: optional binary iceberg_deletion_vector
+  7: optional bool is_data_source_scan
 }
 
 // Specification of an overlap predicate desc.
@@ -438,6 +453,19 @@ struct TPaimonScanNode {
   1: required Types.TTupleId tuple_id
   2: required binary paimon_table_obj
   3: required string table_name;
+}
+
+struct TUnpivotNode {
+  // Maps slot index to the Expr on the source table.
+  1: required list<Exprs.TExpr> source_exprs;
+
+  2: required i32 num_unpivot_columns;
+
+  // Set only if the slot is materialized.
+  3: optional Types.TSlotId data_slot_id;
+  4: optional list<Exprs.TExpr> data_exprs;
+  5: optional Types.TSlotId header_slot_id;
+  6: optional list<Exprs.TExpr> header_exprs;
 }
 
 struct TEqJoinCondition {
@@ -791,7 +819,7 @@ struct TIcebergMergeCase {
 struct TIcebergMergeNode {
   1: required list<TIcebergMergeCase> cases
   2: required Exprs.TExpr row_present
-  3: required list<Exprs.TExpr> delete_meta_exprs
+  3: required list<Exprs.TExpr> row_meta_exprs
   4: required list<Exprs.TExpr> partition_meta_exprs
   5: required Types.TTupleId merge_action_tuple_id
   6: required Types.TTupleId target_tuple_id
@@ -802,6 +830,12 @@ struct TPipelineMembership {
   1: required Types.TPlanNodeId pipe_id
   2: required i32 height
   3: required TExecNodePhase phase
+}
+
+// Pairs HBO statistics type with hash keys for that type
+struct THboHashKeys {
+  1: required HBO.THboStatsType stats_type
+  2: required map<HBO.TCanonicalizationStrategy, string> hash_keys
 }
 
 // This is essentially a union of all messages corresponding to subclasses
@@ -861,7 +895,18 @@ struct TPlanNode {
   28: optional TTupleCacheNode tuple_cache_node
 
   29: optional TSystemTableScanNode system_table_scan_node
+
   31: optional TPaimonScanNode paimon_table_scan_node
+
+  32: optional TUnpivotNode unpivot_node
+
+  // List of hash keys for History-Based Optimization (HBO), grouped by statistics type.
+  // Each entry contains hash keys for a specific statistics type (cardinality or memory),
+  // with keys ordered from most accurate to most aggressive matching.
+  33: optional list<THboHashKeys> hbo_hash_keys
+
+  // Execution stats with some input info that will be stored as historical stats for HBO.
+  34: optional HBO.TPlanNodeRun exec_stats
 }
 
 // A flattened representation of a tree of PlanNodes, obtained by depth-first

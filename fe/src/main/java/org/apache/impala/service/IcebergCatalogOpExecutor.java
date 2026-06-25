@@ -18,10 +18,12 @@
 package org.apache.impala.service;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 
 import org.apache.iceberg.AppendFiles;
@@ -31,6 +33,7 @@ import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.DeleteFiles;
 import org.apache.iceberg.ExpireSnapshots;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileMetadata;
 import org.apache.iceberg.ManageSnapshots;
 import org.apache.iceberg.Metrics;
@@ -52,6 +55,7 @@ import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.catalog.CatalogException;
 import org.apache.impala.catalog.FeFsTable;
 import org.apache.impala.catalog.FeIcebergTable;
+import org.apache.impala.catalog.IcebergFileDescriptor;
 import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.TableLoadingException;
 import org.apache.impala.catalog.TableNotFoundException;
@@ -64,6 +68,8 @@ import org.apache.impala.catalog.iceberg.ImpalaRepairIcebergTable;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.fb.FbIcebergColumnStats;
 import org.apache.impala.fb.FbIcebergDataFile;
+import org.apache.impala.fb.FbIcebergDataFileFormat;
+import org.apache.impala.fb.FbIcebergDeletionVector;
 import org.apache.impala.thrift.TAlterTableDropPartitionParams;
 import org.apache.impala.thrift.TAlterTableExecuteExpireSnapshotsParams;
 import org.apache.impala.thrift.TAlterTableExecuteRemoveOrphanFilesParams;
@@ -154,7 +160,27 @@ public class IcebergCatalogOpExecutor {
     for (TColumn column : columns) {
       org.apache.iceberg.types.Type type =
           IcebergSchemaConverter.fromImpalaColumnType(column.getColumnType());
-      schema.addColumn(column.getColumnName(), type, column.getComment());
+
+      String defaultStr = null;
+      if (column.isSetIceberg_initial_default()) {
+        defaultStr = column.getIceberg_initial_default();
+      } else if (column.isSetIceberg_write_default()) {
+        defaultStr = column.getIceberg_write_default();
+      }
+      if (defaultStr != null) {
+        try {
+          org.apache.iceberg.expressions.Literal<?> defaultValue =
+              IcebergSchemaConverter.parseStringToIcebergLiteral(defaultStr, type);
+          schema.addColumn(column.getColumnName(), type,
+              column.getComment(), defaultValue);
+        } catch (Exception e) {
+          throw new ImpalaRuntimeException(String.format(
+              "Failed to parse default value '%s' for column '%s': %s",
+              defaultStr, column.getColumnName(), e.getMessage()));
+        }
+      } else {
+        schema.addColumn(column.getColumnName(), type, column.getComment());
+      }
     }
     schema.commit();
   }
@@ -183,6 +209,17 @@ public class IcebergCatalogOpExecutor {
     // Update column comment if not empty
     if (newCol.getComment() != null && !newCol.getComment().isEmpty()) {
       schema.updateColumnDoc(colName, newCol.getComment());
+    }
+
+    // Update or drop column write-default.
+    if (newCol.isSetIceberg_drop_write_default()
+        && newCol.isIceberg_drop_write_default()) {
+      schema.updateColumnDefault(newCol.getColumnName(), null);
+    } else if (newCol.isSetIceberg_write_default()) {
+      org.apache.iceberg.expressions.Literal<?> lit =
+          IcebergSchemaConverter.parseStringToIcebergLiteral(
+              newCol.getIceberg_write_default(), type);
+      schema.updateColumnDefault(newCol.getColumnName(), lit);
     }
     schema.commit();
   }
@@ -407,11 +444,14 @@ public class IcebergCatalogOpExecutor {
   private static void deleteRows(FeIcebergTable feIcebergTable, Transaction txn,
       TIcebergOperationParam icebergOp) throws ImpalaRuntimeException {
     List<ByteBuffer> deleteFilesFb = icebergOp.getIceberg_delete_files_fb();
+    List<ByteBuffer> addedDeletionVectorsFb =
+        icebergOp.getIceberg_added_deletion_vectors_fb();
+    List<ByteBuffer> removedDeletionVectorsFb =
+        icebergOp.getIceberg_removed_deletion_vectors_fb();
     RowDelta rowDelta = txn.newRowDelta();
-    for (ByteBuffer buf : deleteFilesFb) {
-      DeleteFile deleteFile = createDeleteFile(feIcebergTable, buf);
-      rowDelta.addDeletes(deleteFile);
-    }
+    applyDeletes(feIcebergTable, removedDeletionVectorsFb, rowDelta,
+        addedDeletionVectorsFb, deleteFilesFb, icebergOp.getInitial_snapshot_id());
+
     // Validate that there are no conflicting data files, because if data files are
     // added in the meantime, they potentially contain records that should have been
     // affected by this DELETE operation.
@@ -423,18 +463,112 @@ public class IcebergCatalogOpExecutor {
     rowDelta.commit();
   }
 
+  private static void applyDeletes(FeIcebergTable feIcebergTable,
+      List<ByteBuffer> removedDeletionVectorsFb, RowDelta rowDelta,
+      List<ByteBuffer> addedDeletionVectorsFb, List<ByteBuffer> deleteFilesFb,
+      long initialSnapshotId)
+      throws ImpalaRuntimeException {
+    boolean hasRemovedDVs = removedDeletionVectorsFb != null
+        && !removedDeletionVectorsFb.isEmpty();
+    boolean hasAddedDVs = addedDeletionVectorsFb != null
+        && !addedDeletionVectorsFb.isEmpty();
+
+    if (hasRemovedDVs || hasAddedDVs) {
+      // DV operation: deleteFilesFb must not be set (the two are mutually exclusive).
+      Preconditions.checkState(deleteFilesFb == null || deleteFilesFb.isEmpty(),
+          "iceberg_delete_files_fb must be empty when deletion vectors are present");
+      applyDeletionVectors(feIcebergTable, removedDeletionVectorsFb, rowDelta,
+          addedDeletionVectorsFb, initialSnapshotId);
+    } else if (deleteFilesFb != null) {
+      for (ByteBuffer buf : deleteFilesFb) {
+        rowDelta.addDeletes(createDeleteFile(feIcebergTable, buf));
+      }
+    }
+  }
+
+  private static void applyDeletionVectors(FeIcebergTable feIcebergTable,
+      List<ByteBuffer> removedDeletionVectorsFb, RowDelta rowDelta,
+      List<ByteBuffer> addedDeletionVectorsFb, long initialSnapshotId)
+      throws ImpalaRuntimeException {
+    if (removedDeletionVectorsFb != null) {
+      Map<String, DeleteFile> deletionVectors =
+          IcebergUtil.lookupDeletionVectors(feIcebergTable, initialSnapshotId);
+      for (ByteBuffer buf : removedDeletionVectorsFb) {
+        FbIcebergDeletionVector dv =
+            FbIcebergDeletionVector.getRootAsFbIcebergDeletionVector(buf);
+        IcebergFileDescriptor dataFileDescriptor = feIcebergTable.getContentFileStore()
+            .getDataFileDescriptorOrThrow(dv.referencedDataFileHashLow(),
+                dv.referencedDataFileHashHigh());
+        String referencedDataFilePath =
+            dataFileDescriptor.getAbsolutePath(feIcebergTable.getLocation());
+        DeleteFile deleteFile = deletionVectors.get(referencedDataFilePath);
+        if (deleteFile == null) {
+          throw new ImpalaRuntimeException(String.format(
+              "Unable to find deletion vector for data file %s in base snapshot %d",
+              referencedDataFilePath, initialSnapshotId));
+        }
+        rowDelta.removeDeletes(deleteFile);
+      }
+    }
+
+    if (addedDeletionVectorsFb != null) {
+      for (ByteBuffer buf : addedDeletionVectorsFb) {
+        FbIcebergDeletionVector dv =
+            FbIcebergDeletionVector.getRootAsFbIcebergDeletionVector(buf);
+        rowDelta.addDeletes(createDeletionVector(feIcebergTable, dv));
+      }
+    }
+  }
+
+  /**
+   * Creates a DeleteFile from a FlatBuffer-encoded deletion vector for adding to
+   * Iceberg metadata.
+   */
+  private static DeleteFile createDeletionVector(
+      FeIcebergTable feIcebergTable, FbIcebergDeletionVector dv)
+      throws ImpalaRuntimeException {
+    IcebergFileDescriptor dataFileDescriptor = feIcebergTable.getContentFileStore()
+        .getDataFileDescriptorOrThrow(dv.referencedDataFileHashLow(),
+            dv.referencedDataFileHashHigh());
+    String referencedDataFile =
+        dataFileDescriptor.getAbsolutePath(feIcebergTable.getLocation());
+
+    int specId = dv.specId();
+    PartitionSpec partSpec = feIcebergTable.getIcebergApiTable().specs().get(specId);
+    Preconditions.checkNotNull(partSpec, "Unknown partition spec id: %s", specId);
+
+    FileMetadata.Builder builder = FileMetadata.deleteFileBuilder(partSpec)
+        .ofPositionDeletes()
+        .withPath(dv.path())
+        .withFormat(FileFormat.PUFFIN)
+        .withContentOffset(dv.contentOffset())
+        .withContentSizeInBytes(dv.contentSizeInBytes())
+        .withReferencedDataFile(referencedDataFile)
+        .withRecordCount(dv.recordCount())
+        .withFileSizeInBytes(dv.fileSizeInBytes());
+
+    IcebergPartitionSpec impPartSpec = feIcebergTable.getPartitionSpec(specId);
+    IcebergUtil.PartitionData partitionData =
+        IcebergUtil.partitionDataFromDeletionVector(
+            partSpec.partitionType(), impPartSpec, dv);
+    if (partitionData != null) builder.withPartition(partitionData);
+
+    return builder.build();
+  }
+
   private static void updateRows(FeIcebergTable feIcebergTable, Transaction txn,
       TIcebergOperationParam icebergOp) throws ImpalaRuntimeException {
     List<ByteBuffer> deleteFilesFb = icebergOp.getIceberg_delete_files_fb();
+    List<ByteBuffer> addedDeletionVectorsFb =
+        icebergOp.getIceberg_added_deletion_vectors_fb();
+    List<ByteBuffer> removedDeletionVectorsFb =
+        icebergOp.getIceberg_removed_deletion_vectors_fb();
     List<ByteBuffer> dataFilesFb = icebergOp.getIceberg_data_files_fb();
     RowDelta rowDelta = txn.newRowDelta();
-    for (ByteBuffer buf : deleteFilesFb) {
-      DeleteFile deleteFile = createDeleteFile(feIcebergTable, buf);
-      rowDelta.addDeletes(deleteFile);
-    }
+    applyDeletes(feIcebergTable, removedDeletionVectorsFb, rowDelta,
+        addedDeletionVectorsFb, deleteFilesFb, icebergOp.getInitial_snapshot_id());
     for (ByteBuffer buf : dataFilesFb) {
-      DataFile dataFile = createDataFile(feIcebergTable, buf);
-      rowDelta.addRows(dataFile);
+      rowDelta.addRows(createDataFile(feIcebergTable, buf));
     }
     // Validate that there are no conflicting data files, because if data files are
     // added in the meantime, they potentially contain records that should have been
@@ -491,6 +625,10 @@ public class IcebergCatalogOpExecutor {
     IcebergUtil.PartitionData partitionData = IcebergUtil.partitionDataFromDataFile(
         partSpec.partitionType(), impPartSpec, deleteFile);
     if (partitionData != null) builder.withPartition(partitionData);
+    if (deleteFile.format() == FbIcebergDataFileFormat.PUFFIN) {
+      throw new ImpalaRuntimeException(
+          "Unexpected PUFFIN format in non-DV delete file path: " + deleteFile.path());
+    }
     return builder.build();
   }
 
@@ -574,6 +712,9 @@ public class IcebergCatalogOpExecutor {
     for (DeleteFile deleteFile : contentFiles.positionDeleteFiles) {
       rewrite.deleteFile(deleteFile);
     }
+    for (DeleteFile dvDeleteFile : contentFiles.dataFileToDV.values()) {
+      rewrite.deleteFile(dvDeleteFile);
+    }
     for (DeleteFile deleteFile : contentFiles.equalityDeleteFiles) {
       rewrite.deleteFile(deleteFile);
     }
@@ -623,6 +764,27 @@ public class IcebergCatalogOpExecutor {
     }
     if (icebergOp.isSetIceberg_delete_files_fb()) {
       deleteIcebergFiles(icebergOp.getIceberg_delete_files_fb());
+    }
+    // For DV operations iceberg_delete_files_fb is not set; clean up puffin files
+    // referenced by the added deletion vectors instead.
+    if (icebergOp.isSetIceberg_added_deletion_vectors_fb()) {
+      deleteDvPuffinFiles(icebergOp.getIceberg_added_deletion_vectors_fb());
+    }
+  }
+
+  /**
+   * Deletes the puffin files referenced by the given deletion vector FlatBuffers.
+   * Multiple deletion vectors may share a single puffin file, so paths are deduplicated.
+   */
+  private static void deleteDvPuffinFiles(Iterable<ByteBuffer> dvFbs) {
+    Set<String> paths = new HashSet<>();
+    for (ByteBuffer buf : dvFbs) {
+      FbIcebergDeletionVector dv =
+          FbIcebergDeletionVector.getRootAsFbIcebergDeletionVector(buf);
+      if (dv.path() != null) paths.add(dv.path());
+    }
+    for (String path : paths) {
+      deleteIfExists(new org.apache.hadoop.fs.Path(path));
     }
   }
 

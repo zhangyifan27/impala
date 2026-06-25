@@ -58,6 +58,7 @@ import org.apache.hadoop.hive.metastore.api.UnknownDBException;
 import org.apache.impala.authorization.AuthorizationChecker;
 import org.apache.impala.authorization.AuthorizationPolicy;
 import org.apache.impala.catalog.AuthzCacheInvalidation;
+import org.apache.impala.catalog.IcebergContentFileStore;
 import org.apache.impala.catalog.Catalog;
 import org.apache.impala.catalog.CatalogDeltaLog;
 import org.apache.impala.catalog.CatalogException;
@@ -69,6 +70,7 @@ import org.apache.impala.catalog.HdfsCachePool;
 import org.apache.impala.catalog.HdfsPartitionLocationCompressor;
 import org.apache.impala.catalog.HdfsStorageDescriptor;
 import org.apache.impala.catalog.HdfsTable;
+import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.ImpaladCatalog.ObjectUpdateSequencer;
 import org.apache.impala.catalog.Principal;
 import org.apache.impala.catalog.PrincipalPrivilege;
@@ -120,7 +122,6 @@ import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TBinaryProtocol;
-import org.ehcache.sizeof.SizeOf;
 import org.github.jamm.CannotAccessFieldException;
 import org.github.jamm.MemoryMeter;
 import org.slf4j.Logger;
@@ -208,7 +209,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
  */
 public class CatalogdMetaProvider implements MetaProvider {
 
-  private final static Logger LOG = LoggerFactory.getLogger(CatalogdMetaProvider.class);
+  private static final Logger LOG = LoggerFactory.getLogger(CatalogdMetaProvider.class);
 
   /**
    * Sentinel value used as a negative cache entry for column statistics.
@@ -256,6 +257,12 @@ public class CatalogdMetaProvider implements MetaProvider {
       CATALOG_FETCH_PREFIX + "." + RPC_STATS_CATEGORY + ".Bytes";
   private static final String RPC_TIME =
       CATALOG_FETCH_PREFIX + "." + RPC_STATS_CATEGORY + ".Time";
+
+  // Weight is an integer and can't be > 2GB. Catalog objects greater than
+  // that are not totally unrealistic (tested with 1M file Iceberg table that
+  // was measuered as ~500MB). Dividing size by 16 allows correctly tracking
+  // entries up to 32GB while not affecting precision significantly.
+  private static final int BYTES_PER_WEIGHT_UNIT = 16;
 
   /**
    * File descriptors store replicas using a compressed format that references hosts
@@ -390,10 +397,9 @@ public class CatalogdMetaProvider implements MetaProvider {
     // and size-triggered) and make sure results are still correct.
     cache_ = CacheBuilder.newBuilder()
         .concurrencyLevel(concurrencyLevel)
-        .maximumWeight(cacheSizeBytes)
+        .maximumWeight((cacheSizeBytes - 1) / BYTES_PER_WEIGHT_UNIT + 1)
         .expireAfterAccess(expirationSecs, TimeUnit.SECONDS)
-        .weigher(new SizeOfWeigher(
-            BackendConfig.INSTANCE.useJammWeigher(), cacheEntrySize_))
+        .weigher(new SizeOfWeigher(cacheEntrySize_))
         .recordStats()
         .build();
   }
@@ -613,7 +619,9 @@ public class CatalogdMetaProvider implements MetaProvider {
         // Assuming we were able to load the value, store it back into the map
         // as a plain-old object. This is important to get the proper weight in the
         // map. If someone invalidated this load concurrently, this 'replace' will
-        // fail because 'f' will not be the current value.
+        // fail because 'f' will not be the current value. Eviction can also cause
+        // failures - while size based eviction should not happen as CompletableFuture
+        // is weighed as 0, time based eviction can still occur.
         cache_.asMap().replace(key, f, f.get());
       } catch (Exception e) {
         // If there was an exception, remove it from the map so that any later loads
@@ -973,6 +981,10 @@ public class CatalogdMetaProvider implements MetaProvider {
   @Override
   public List<PartitionRef> loadPartitionList(final TableMetaRef table)
       throws TException {
+    // For Iceberg tables, delegate to the dummy Iceberg partition loading logic
+    if (table.isIceberg()) {
+      return IcebergMetaProvider.loadPartitionListHelper();
+    }
     PartitionListCacheKey key = new PartitionListCacheKey((TableMetaRefImpl) table);
     return (List<PartitionRef>) loadWithCaching("partition list for " + table,
         PARTITION_LIST_STATS_CATEGORY, key, new Callable<List<PartitionRef>>() {
@@ -1010,6 +1022,11 @@ public class CatalogdMetaProvider implements MetaProvider {
       throws CatalogException, TException {
     Preconditions.checkArgument(table instanceof TableMetaRefImpl);
     TableMetaRefImpl refImpl = (TableMetaRefImpl)table;
+    // For Iceberg tables, delegate to the dummy Iceberg partition loading logic
+    if (table.isIceberg()) {
+      return IcebergMetaProvider.loadPartitionsByRefsHelper(refImpl.msTable_);
+    }
+
     Stopwatch sw = Stopwatch.createStarted();
     // Load what we can from the cache.
     Map<PartitionRef, PartitionMetadata> refToMeta = loadPartitionsFromCache(refImpl,
@@ -1208,8 +1225,10 @@ public class CatalogdMetaProvider implements MetaProvider {
         new Callable<TPartialTableInfo>() {
           @Override
           public TPartialTableInfo call() throws Exception {
+            // Load Iceberg table without file list.
             TGetPartialCatalogObjectRequest req = newReqForTable(table);
             req.table_info_selector.want_iceberg_table = true;
+            req.table_info_selector.want_partition_files = false;
             TGetPartialCatalogObjectResponse resp = sendRequest(req);
             checkResponse(resp.table_info != null &&
                 resp.table_info.iceberg_table != null, req,
@@ -1217,6 +1236,109 @@ public class CatalogdMetaProvider implements MetaProvider {
             return resp.getTable_info();
           }
     });
+  }
+
+  @Override
+  public CachedIcebergFiles
+      loadIcebergContentFileStore(final TableMetaRef table) throws TException {
+    Preconditions.checkArgument(table instanceof TableMetaRefImpl);
+    TableMetaRefImpl tableRef = (TableMetaRefImpl)table;
+
+    String itemStr = "content file store for " + tableRef.dbName_ + "."
+        + tableRef.tableName_;
+    // TODO: use snapshot id for key to make usable for REST catalog
+    IcebergContentFileStoreCacheKey cacheKey =
+        new IcebergContentFileStoreCacheKey(tableRef);
+    MetaProvider.CachedIcebergFiles result =
+        loadWithCaching(itemStr, TABLE_METADATA_CACHE_CATEGORY, cacheKey,
+          new Callable<CachedIcebergFiles>() {
+            @Override
+            public CachedIcebergFiles call() throws Exception {
+              TPartialTableInfo tableInfo = loadIcebergTableWithPagination(table);
+              ListMap<TNetworkAddress> hostIndex = new ListMap<>();
+              IcebergContentFileStore contentFiles = IcebergContentFileStore.fromThrift(
+                  tableInfo.getIceberg_table().getContent_files(),
+                  tableInfo.getNetwork_addresses(),
+                  hostIndex);
+              return new CachedIcebergFiles(
+                  contentFiles, hostIndex,
+                  tableInfo.getIceberg_table().getPartition_stats());
+            }
+          });
+
+    // The result is cloned to share immutable members but keep mutable ones private.
+    // Mutable concurrent hash maps are used to cache files from time-travel queries,
+    // which is thread-safe, but would increase the size of the cached object without
+    // updating weight.
+    // TODO: come up with a way to cache files in time-travel queries
+    return new MetaProvider.CachedIcebergFiles(result.fileStore.cloneWithoutMutables(),
+        result.hostIndex, result.partitionStats);
+  }
+
+  /**
+   * Load Iceberg table metadata, handling partial file responses with pagination.
+   * Similar to loadPartitionsFromCatalogd but for Iceberg file pagination.
+   */
+  @VisibleForTesting
+  TPartialTableInfo loadIcebergTableWithPagination(TableMetaRef table)
+      throws TException {
+    TGetPartialCatalogObjectRequest req = newReqForTable(table);
+    req.table_info_selector.want_iceberg_table = true;
+    req.table_info_selector.want_partition_files = true;
+    req.table_info_selector.setIceberg_file_offset(0);
+
+    TGetPartialCatalogObjectResponse resp = sendRequest(req);
+    checkResponse(resp.table_info != null &&
+        resp.table_info.iceberg_table != null, req,
+        "missing Iceberg table metadata");
+
+    // Count files in initial response
+    long filesReceived = IcebergContentFileStore.countContentFiles(
+        resp.table_info.iceberg_table.content_files);
+    long fileOffset = filesReceived;
+
+    // The first response must include the total file count so we know exactly how many
+    // pages to fetch without a trailing empty RPC.
+    checkResponse(resp.table_info.iceberg_table.content_files.isSetTotal_file_count(),
+        req, "missing total_file_count in first Iceberg file response");
+    long totalFiles =  resp.table_info.iceberg_table.content_files.getTotal_file_count();
+
+    int requestCount = 1;
+    while (fileOffset < totalFiles) {
+      LOG.info("Fetched {} files for Iceberg table {} in request {}. " +
+          "Sending follow-up request for more files.",
+          filesReceived, table, requestCount);
+
+      TGetPartialCatalogObjectRequest nextReq = newReqForTable(table);
+      nextReq.table_info_selector.want_iceberg_table = true;
+      nextReq.table_info_selector.want_partition_files = true;
+      nextReq.table_info_selector.setIceberg_file_offset(fileOffset);
+
+      TGetPartialCatalogObjectResponse nextResp = sendRequest(nextReq);
+      checkResponse(nextResp.table_info != null &&
+          nextResp.table_info.iceberg_table != null, nextReq,
+          "missing Iceberg table metadata in follow-up request");
+
+      // Merge the content files
+      IcebergContentFileStore.mergeContentFiles(
+          resp.table_info.iceberg_table.content_files,
+          nextResp.table_info.iceberg_table.content_files);
+
+      filesReceived = IcebergContentFileStore.countContentFiles(
+          nextResp.table_info.iceberg_table.content_files);
+      fileOffset += filesReceived;
+      requestCount++;
+    }
+
+    if (requestCount > 1) {
+      LOG.info("Fetched {} total files for Iceberg table {} across {} requests",
+          fileOffset, table, requestCount);
+    }
+
+    // total_file_count is a pagination transport hint; unset it before returning so
+    // callers see a clean TIcebergContentFileStore without transport-layer metadata.
+    resp.table_info.iceberg_table.content_files.unsetTotal_file_count();
+    return resp.getTable_info();
   }
 
   @Override
@@ -2060,6 +2182,11 @@ public class CatalogdMetaProvider implements MetaProvider {
 
     @Override
     public long getLoadedTimeMs() { return loadedTimeMs_; }
+
+    @Override
+    public boolean isIceberg() {
+      return IcebergTable.isIcebergTable(msTable_);
+    }
   }
 
   /**
@@ -2268,6 +2395,18 @@ public class CatalogdMetaProvider implements MetaProvider {
   }
 
   /**
+   * Cache key for an entry storing Iceberg files
+   *
+   * Values for these keys are 'MetaProvider.CachedIcebergFiles' objects.
+   */
+  private static class IcebergContentFileStoreCacheKey extends VersionedTableCacheKey {
+
+    public IcebergContentFileStoreCacheKey(TableMetaRefImpl table) {
+      super(table);
+    }
+  }
+
+  /**
    * Cache key for a DataSource object.
    */
   @Immutable
@@ -2293,67 +2432,85 @@ public class CatalogdMetaProvider implements MetaProvider {
 
   @VisibleForTesting
   static class SizeOfWeigher implements Weigher<Object, Object> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SizeOfWeigher.class);
+
     // Bypass flyweight objects like small boxed integers, Boolean.TRUE, enums, etc.
     private static final boolean BYPASS_FLYWEIGHT = true;
     // Cache the reflected sizes of classes seen.
     private static final boolean CACHE_SIZES = true;
 
+    // TODO: consider Compressed OOPs?
+    // actually the JVM uses 4 byte references, at least in my dev setup
+    //   import org.openjdk.jol.vm.VM;
+    //   VM.current().details() ->
+    // VM mode: 64 bits
+    // Compressed references (oops): 3-bit shift
+    // Compressed class pointers: 3-bit shift
+    // WARNING | Compressed references base/shifts are guessed by the experiment!
+    // WARNING | Therefore, computed addresses are just guesses, and ARE NOT RELIABLE.
+    // WARNING | Make sure to attach Serviceability Agent to get the reliable addresses.
+    // Object alignment: 8 bytes
+    //                       ref, bool, byte, char, shrt,  int,  flt,  lng,  dbl
+    // Field sizes:            4,    1,    1,    2,    2,    4,    4,    8,    8
+    // Array element sizes:    4,    1,    1,    2,    2,    4,    4,    8,    8
+    // Array base offsets:    16,   16,   16,   16,   16,   16,   16,   16,   16
     private static final int BYTES_PER_WORD = 8; // Assume 64-bit VM.
+
     // Guava cache overhead based on:
     // http://code-o-matic.blogspot.com/2012/02/updated-memory-cost-per-javaguava.html
     private static final int OVERHEAD_PER_ENTRY =
         12 * BYTES_PER_WORD + // base cost per entry
         4 * BYTES_PER_WORD;  // for use of 'maximumSize()'
 
-    // Retain Ehcache while Jamm is thoroughly tested. We only expect to make one
-    // CatalogdMetaProvider and thus one SizeOfWeigher.
-    private final SizeOf SIZEOF;
     private final MemoryMeter METER;
 
-    private final boolean useJamm_;
     private final Histogram entrySize_;
 
-    public SizeOfWeigher(boolean useJamm, Histogram entrySize) {
-      if (useJamm) {
-        METER = MemoryMeter.builder().build();
-        SIZEOF = null;
-      } else {
-        SIZEOF = SizeOf.newInstance(BYPASS_FLYWEIGHT, CACHE_SIZES);
-        METER = null;
-      }
-      useJamm_ = useJamm;
+    public SizeOfWeigher(Histogram entrySize) {
+      METER = MemoryMeter.builder().build();
       entrySize_ = entrySize;
     }
 
     public SizeOfWeigher() {
-      this(true, null);
+      this(null);
     }
 
     @Override
     public int weigh(Object key, Object value) {
-      long size = OVERHEAD_PER_ENTRY;
-      try {
-        if (useJamm_) {
-          size += METER.measureDeep(key);
-          size += METER.measureDeep(value);
-        } else {
-          size += SIZEOF.deepSizeOf(key, value);
-        }
-      } catch (CannotAccessFieldException e) {
-        // This may happen if we miss an add-opens call for lambdas in Java 17.
-        LOG.warn("Unable to weigh cache entry, additional add-opens needed", e);
-      } catch (UnsupportedOperationException e) {
-        // Thrown by ehcache for lambdas in Java 17.
-        LOG.warn("Unable to weigh cache entry", e);
-      }
+      // Return 0 weight for CompletableFuture to avoid size based eviction during
+      // loading. CompletableFuture is only 24 byte (based on jamm) and there is at
+      // least 1 thread waiting for each, so there should be a limited number of them.
+      // With keys included it should be just 100-200 bytes per entry.
+      long size = (value instanceof CompletableFuture) ? 0 : measureSize(key, value);
+      LOG.trace("size: {} key class: {} value class: {}", size,
+          key.getClass().getName(), value == null ? "NULL" : value.getClass().getName());
+
+      // Also return on negative (the cache handles it as error).
+      if (size <= 0) return (int)size;
 
       if (entrySize_ != null) {
         entrySize_.update(size);
       }
-      if (size > Integer.MAX_VALUE) {
+      // Round up weight to avoid returning 0.
+      long weight = (size - 1) / BYTES_PER_WEIGHT_UNIT + 1;
+      if (weight > Integer.MAX_VALUE) {
+        LOG.warn("weight exceeded Integer.MAX_VALUE: {}", size);
         return Integer.MAX_VALUE;
       }
-      return (int)size;
+      return (int)weight;
+    }
+
+    long measureSize(Object key, Object value) {
+      long size = OVERHEAD_PER_ENTRY;
+      try {
+        size += METER.measureDeep(key);
+        size += METER.measureDeep(value);
+      } catch (CannotAccessFieldException e) {
+        // This may happen if we miss an add-opens call for lambdas in Java 17.
+        LOG.warn("Unable to weigh cache entry, additional add-opens needed", e);
+      }
+      return size;
     }
   }
 

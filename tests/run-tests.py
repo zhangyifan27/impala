@@ -1,4 +1,4 @@
-#!/usr/bin/env impala-env-versioned-python
+#!/usr/bin/env impala-python3
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -22,7 +22,6 @@
 # executing the remaining tests in parallel. To run only some of
 # these, use --skip-serial, --skip-stress, or --skip-parallel.
 # All additional command line options are passed to py.test.
-from __future__ import absolute_import, division, print_function
 from tests.common.impala_cluster import ImpalaCluster
 from tests.common.impala_service import ImpaladService
 from tests.conftest import configure_logging
@@ -344,7 +343,7 @@ if __name__ == "__main__":
     # Run the remaining query tests in parallel
     if not skip_parallel:
       base_args = conf_args + ['-m', 'not execute_serially and not stress',
-                               '-n', NUM_CONCURRENT_TESTS]
+                               '-n', NUM_CONCURRENT_TESTS, '--dist=worksteal']
       run(base_args + build_test_args("parallel{0}".format(shard_identifier)))
 
     # The total number of tests executed at this point is expected to be >0

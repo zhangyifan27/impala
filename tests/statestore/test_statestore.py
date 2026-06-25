@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from collections import defaultdict
 import json
 import logging
@@ -24,11 +23,11 @@ import sys
 import threading
 import time
 import traceback
+from urllib.request import urlopen
 import uuid
 
 import pytest
 
-from builtins import range
 from thrift.protocol import TBinaryProtocol
 from thrift.server.TServer import TServer
 from thrift.transport import TSocket, TTransport
@@ -46,10 +45,6 @@ from tests.common.base_test_suite import BaseTestSuite
 from tests.common.environ import build_flavor_timeout
 from tests.common.skip import SkipIfDockerizedCluster
 
-try:
-  from urllib.request import urlopen
-except ImportError:
-  from urllib2 import urlopen
 
 LOG = logging.getLogger('test_statestore')
 
@@ -71,9 +66,9 @@ LOG = logging.getLogger('test_statestore')
 
 
 def get_statestore_subscribers(host='localhost', port=25010):
-  response = urlopen("http://{0}:{1}/subscribers?json".format(host, port))
-  page = response.read()
-  return json.loads(page)
+  with urlopen("http://{0}:{1}/subscribers?json".format(host, port)) as response:
+    page = response.read()
+    return json.loads(page)
 
 
 STATUS_OK = TStatus(TErrorCode.OK)
@@ -135,6 +130,8 @@ class KillableThreadedServer(TServer):
         return
       except Exception:
         if i == num_tries - 1: raise
+      finally:
+        cnxn.close()
       time.sleep(0.5)
 
   def wait_until_down(self, num_tries=10):
@@ -145,6 +142,8 @@ class KillableThreadedServer(TServer):
       except Exception:
         LOG.info('Server localhost:{} is down'.format(cnxn.port))
         return
+      finally:
+        cnxn.close()
       time.sleep(0.5)
     raise Exception("Server localhost:{} did not stop".format(cnxn.port))
 
@@ -154,13 +153,10 @@ class KillableThreadedServer(TServer):
       client = self.serverTransport.accept()
       # Since accept() can take a while, check again if the server is shutdown to avoid
       # starting an unnecessary thread.
-      if self.is_shutdown: return
-      t = None
-      if sys.version_info.major < 3:
-        t = threading.Thread(target=self.handle, args=(client,))
-        t.setDaemon(True)
-      else:
-        t = threading.Thread(target=self.handle, args=(client,), daemon=self.daemon)
+      if self.is_shutdown:
+        client.close()
+        return
+      t = threading.Thread(target=self.handle, args=(client,), daemon=self.daemon)
       t.start()
 
   def handle(self, client):
@@ -259,11 +255,7 @@ class StatestoreSubscriber(object):
     pfactory = TBinaryProtocol.TBinaryProtocolFactory()
     self.server = KillableThreadedServer(processor, transport, tfactory, pfactory,
                                          daemon=True)
-    if sys.version_info.major < 3:
-      self.server_thread = threading.Thread(target=self.server.serve)
-      self.server_thread.setDaemon(True)
-    else:
-      self.server_thread = threading.Thread(target=self.server.serve, daemon=True)
+    self.server_thread = threading.Thread(target=self.server.serve, daemon=True)
     self.server_thread.start()
     self.server.wait_until_up()
     self.port = self.server.port

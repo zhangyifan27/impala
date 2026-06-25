@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
@@ -40,12 +41,11 @@ import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.Snapshot;
-import org.apache.iceberg.mr.Catalogs;
-import org.apache.iceberg.mr.InputFormatConfig;
 import org.apache.impala.analysis.IcebergPartitionField;
 import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.analysis.IcebergPartitionTransform;
 import org.apache.impala.catalog.iceberg.GroupedContentFiles;
+import org.apache.impala.catalog.iceberg.IcebergCatalogUtil;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.PrintUtils;
 import org.apache.impala.service.BackendConfig;
@@ -58,6 +58,7 @@ import org.apache.impala.thrift.TGetPartialCatalogObjectResponse;
 import org.apache.impala.thrift.THdfsCompression;
 import org.apache.impala.thrift.THdfsTable;
 import org.apache.impala.thrift.TIcebergCatalog;
+import org.apache.impala.thrift.TIcebergContentFileStore;
 import org.apache.impala.thrift.TIcebergFileFormat;
 import org.apache.impala.thrift.TIcebergPartitionField;
 import org.apache.impala.thrift.TIcebergPartitionSpec;
@@ -114,6 +115,7 @@ public class IcebergTable extends Table implements FeIcebergTable {
   // Iceberg format version numbers
   public static final int ICEBERG_FORMAT_V1 = 1;
   public static final int ICEBERG_FORMAT_V2 = 2;
+  public static final int ICEBERG_FORMAT_V3 = 3;
 
   // Iceberg table catalog location key in tblproperties when using HadoopCatalog
   // This property is necessary for both managed and external Iceberg table with
@@ -254,6 +256,21 @@ public class IcebergTable extends Table implements FeIcebergTable {
   // The snapshot id cached in the CatalogD, necessary to syncronize the caches.
   private long catalogSnapshotId_ = -1;
 
+  // The snapshot id of the last successfully loaded IcebergContentFileStore.
+  // -1 until the table has been loaded at least once.
+  private long loadedSnapshotId_ = -1;
+
+  // The firstRowId of the last successfully loaded snapshot. Used to detect the
+  // first new snapshot written after an upgrade to Iceberg v3: when the loaded snapshot
+  // had no firstRowId (-1) but the new one does, existing data files lack row IDs so
+  // a full file metadata reload is required.
+  private long loadedFirstRowId_ = -1;
+
+  // The Iceberg format version (1, 2, or 3) of the last successfully loaded snapshot.
+  // Cached here to detect version changes across reloads; a format version change forces
+  // a full file metadata reload.
+  private int loadedFormatVersion_ = -1;
+
   private Map<Integer, IcebergColumn> icebergFieldIdToCol_;
   private Map<String, TIcebergPartitionStats> partitionStats_;
 
@@ -310,8 +327,10 @@ public class IcebergTable extends Table implements FeIcebergTable {
   public void setCatalogVersion(long newVersion) {
     // We use 'hdfsTable_' to answer CatalogServiceCatalog.doGetPartialCatalogObject(), so
     // its version number needs to be updated as well.
-    super.setCatalogVersion(newVersion);
-    hdfsTable_.setCatalogVersion(newVersion);
+    // Use setCatalogVersionAndGet() to atomically apply pendingVersion promotion in
+    // HdfsTable and get back the effective version in a single synchronized block
+    long effectiveVersion = hdfsTable_.setCatalogVersionAndGet(newVersion);
+    super.setCatalogVersion(effectiveVersion);
   }
 
   @Override
@@ -410,6 +429,27 @@ public class IcebergTable extends Table implements FeIcebergTable {
   }
 
   @Override
+  public List<Column> getColumnsInHiveOrder() {
+    if (getFormatVersion() < 3) {
+      return super.getColumnsInHiveOrder();
+    } else {
+      return super.getColumnsInHiveOrder().stream()
+          .filter(col -> !col.isHidden())
+          .collect(Collectors.toList());
+    }
+  }
+
+  @Override
+  public List<String> getColumnNames() {
+    return filterHiddenColumnNames(super.getColumns());
+  }
+
+  @Override
+  public List<Column> getNonClusteringColumns() {
+    return filterHiddenColumns(super.getNonClusteringColumns());
+  }
+
+  @Override
   public TTable toThrift() {
     TTable table = super.toThrift();
     table.setTable_type(TTableType.ICEBERG_TABLE);
@@ -422,7 +462,8 @@ public class IcebergTable extends Table implements FeIcebergTable {
   public TTable toHumanReadableThrift() {
     TTable table = super.toThrift();
     table.setTable_type(TTableType.ICEBERG_TABLE);
-    table.setIceberg_table(Utils.getTIcebergTable(this));
+    table.setIceberg_table(
+        Utils.getTIcebergTable(this, ThriftObjectType.DESCRIPTOR_ONLY));
     table.setHdfs_table(transformToTHdfsTable(true, ThriftObjectType.DESCRIPTOR_ONLY));
     return table;
   }
@@ -501,23 +542,21 @@ public class IcebergTable extends Table implements FeIcebergTable {
 
   /**
    * Reloads file metadata, unless reuseMetadata is true and metadata.json file hasn't
-   * changed.
+   * changed, or the Iceberg snapshot hasn't changed since the previous load.
    */
   private void loadFileMetadata(boolean reuseMetadata, IMetaStoreClient msClient,
       String reason, EventSequence catalogTimeline) throws IcebergTableLoadingException {
-    if (reuseMetadata && canSkipReload()) {
+    if (reuseMetadata && canSkipDataReload()) {
       catalogTimeline.markEvent(
           "Iceberg table reload skipped as no change detected");
       return;
     }
     final Timer.Context ctxStorageLdTime =
         getMetrics().getTimer(Table.LOAD_DURATION_STORAGE_METADATA).time();
+    boolean incremental = false;
     try {
       currentMetadataLocation_ =
           ((BaseTable)icebergApiTable_).operations().current().metadataFileLocation();
-      GroupedContentFiles icebergFiles = IcebergUtil.getIcebergFiles(this,
-          new ArrayList<>(), /*timeTravelSpec=*/null);
-      catalogTimeline.markEvent("Loaded Iceberg content file list");
       // We use IcebergFileMetadataLoader directly to load file metadata, so we don't
       // want 'hdfsTable_' to do any file loading.
       hdfsTable_.setSkipIcebergFileMetadataLoading(true);
@@ -525,37 +564,87 @@ public class IcebergTable extends Table implements FeIcebergTable {
       // create an external Iceberg table, we have no column information in the SQL
       // statement.
       hdfsTable_.load(reuseMetadata, msClient, msTable_, reason, catalogTimeline);
-      IcebergFileMetadataLoader loader = new IcebergFileMetadataLoader(
-          icebergApiTable_,
-          fileStore_ == null ? Collections.emptyList() : fileStore_.getAllFiles(),
-          getHostIndex(), Preconditions.checkNotNull(icebergFiles),
-          fileStore_ == null ? Collections.emptyList() : fileStore_.getPartitionList(),
-          Utils.requiresDataFilesInTableLocation(this));
-      loader.load();
-      catalogTimeline.markEvent("Loaded Iceberg file descriptors");
-      fileStore_ = new IcebergContentFileStore(icebergApiTable_,
-          loader.getLoadedIcebergFds(), icebergFiles, loader.getIcebergPartitions());
-      partitionStats_ = Utils.loadPartitionStats(this, icebergFiles);
 
+      incremental = canDoIncrementalLoad();
+
+      GroupedContentFiles icebergFiles = incremental
+          ? IcebergUtil.getNewIcebergFilesBetweenSnapshots(
+                icebergApiTable_, loadedSnapshotId_, catalogSnapshotId_)
+          : IcebergUtil.getIcebergFiles(
+                this, Collections.emptyList(), /*timeTravelSpec=*/null);
+      catalogTimeline.markEvent(
+          incremental ? "Loaded Iceberg content file list incrementally"
+                      : "Loaded Iceberg content file list");
+
+      fileStore_ = IcebergFileMetadataLoader.loadContentFilesStore(
+          icebergApiTable_, fileStore_, icebergFiles, getHostIndex(),
+          Utils.requiresDataFilesInTableLocation(this), incremental, fileMetadataStats_);
+      updateMetrics(fileMetadataStats_);
+      partitionStats_ = Utils.loadPartitionStats(
+          icebergApiTable_, icebergFiles, incremental ? partitionStats_ : null);
+
+      catalogTimeline.markEvent(
+          incremental ? "Loaded Iceberg file descriptors incrementally"
+                      : "Loaded Iceberg file descriptors");
       setAvroSchema(msClient, msTable_, fileStore_, catalogTimeline);
-      updateMetrics(loader.getFileMetadataStats());
+      updateLoadedState();
     } catch (Exception e) {
       throw new IcebergTableLoadingException("Error loading metadata for Iceberg table "
           + icebergTableLocation_, e);
     } finally {
       storageMetadataLoadTime_ = ctxStorageLdTime.stop();
     }
-    LOG.info("Loaded file and block metadata for {}. Time taken: {}",
-        getFullName(), PrintUtils.printTimeNs(storageMetadataLoadTime_));
+    LOG.info("Loaded file and block metadata for {}{}. Time taken: {}",
+        getFullName(), incremental ? " incrementally" : "",
+        PrintUtils.printTimeNs(storageMetadataLoadTime_));
   }
 
-  private boolean canSkipReload() {
+  // Returns true if file metadata can be loaded incrementally: we have a previously
+  // loaded snapshot to build on and all intervening operations are appends. A format
+  // version change also blocks incremental loading as a conservative measure, even though
+  // it is not really necessary. Also guards against the first new snapshot after an
+  // Iceberg v3 upgrade, where existing data files lack row IDs (detected by
+  // loadedFirstRowId_ == -1 while the new snapshot already has a firstRowId).
+  private boolean canDoIncrementalLoad() {
+    if (loadedSnapshotId_ == -1
+        || catalogSnapshotId_ == loadedSnapshotId_
+        || fileStore_ == null) {
+      return false;
+    }
+    if (getFormatVersion() != loadedFormatVersion_) return false;
+    Snapshot currentSnapshot = catalogSnapshotId_ == -1
+        ? null : icebergApiTable_.snapshot(catalogSnapshotId_);
+    Long currentFirstRowId = currentSnapshot != null
+        ? currentSnapshot.firstRowId() : null;
+    if (loadedFirstRowId_ == -1 && currentFirstRowId != null) return false;
+    return IcebergUtil.onlyAppendsBetweenSnapshots(
+        icebergApiTable_, loadedSnapshotId_, catalogSnapshotId_);
+  }
+
+  private void updateLoadedState() {
+    loadedSnapshotId_ = catalogSnapshotId_;
+    Snapshot loadedSnapshot = catalogSnapshotId_ == -1
+        ? null : icebergApiTable_.snapshot(catalogSnapshotId_);
+    Long loadedFirstRowId = loadedSnapshot != null ? loadedSnapshot.firstRowId() : null;
+    loadedFirstRowId_ = loadedFirstRowId != null ? loadedFirstRowId : -1;
+    loadedFormatVersion_ = getFormatVersion();
+  }
+
+  private boolean canSkipDataReload() {
     if (icebergApiTable_ == null) return false;
     Preconditions.checkState(icebergApiTable_ instanceof BaseTable);
     BaseTable newTable = (BaseTable) icebergApiTable_;
-    return Objects.equals(
+    if (Objects.equals(
         currentMetadataLocation_,
-        newTable.operations().current().metadataFileLocation());
+        newTable.operations().current().metadataFileLocation())) {
+      return true;
+    }
+    if (loadedSnapshotId_ != -1
+        && loadedSnapshotId_ == catalogSnapshotId_
+        && fileStore_ != null) {
+      return true;
+    }
+    return false;
   }
 
   private void updateMetrics(FileMetadataStats stats) {
@@ -655,9 +744,9 @@ public class IcebergTable extends Table implements FeIcebergTable {
       if (!tableId.equalsIgnoreCase(
               params.getOrDefault(IcebergTable.ICEBERG_TABLE_IDENTIFIER, tableId)) ||
           !tableId.equalsIgnoreCase(
-              params.getOrDefault(Catalogs.NAME, tableId)) ||
+              params.getOrDefault(IcebergCatalogUtil.CATALOGS_NAME_PROPERTY, tableId)) ||
           !tableId.equalsIgnoreCase(
-              params.getOrDefault(InputFormatConfig.TABLE_IDENTIFIER, tableId))) {
+              params.getOrDefault(IcebergCatalogUtil.TABLE_IDENTIFIER, tableId))) {
         throw new TableLoadingException(String.format(
             "Table %s cannot be loaded because it is an " +
             "EXTERNAL table in the HiveCatalog that points to another table. " +
@@ -674,6 +763,7 @@ public class IcebergTable extends Table implements FeIcebergTable {
       throws TableLoadingException, ImpalaRuntimeException {
     loadSchema();
     addVirtualColumns();
+    addHiddenColumns();
     partitionSpecs_ = Utils.loadPartitionSpecByIceberg(this);
     defaultPartitionSpecId_ = icebergApiTable_.spec().specId();
   }
@@ -730,6 +820,18 @@ public class IcebergTable extends Table implements FeIcebergTable {
     addVirtualColumn(VirtualColumn.PARTITION_SPEC_ID);
     addVirtualColumn(VirtualColumn.ICEBERG_PARTITION_SERIALIZED);
     addVirtualColumn(VirtualColumn.ICEBERG_DATA_SEQUENCE_NUMBER);
+    addVirtualColumn(VirtualColumn.ICEBERG_FIRST_ROW_ID);
+    if (getFormatVersion() >= 3) {
+      addVirtualColumn(VirtualColumn.ICEBERG_ROW_ID);
+      addVirtualColumn(VirtualColumn.ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER);
+    }
+  }
+
+  private void addHiddenColumns() {
+    for (Column col : FeIcebergTable.getHiddenColumns(
+        getFormatVersion(), getColumns().size())) {
+      addColumn(col);
+    }
   }
 
   @Override
@@ -864,12 +966,50 @@ public class IcebergTable extends Table implements FeIcebergTable {
     }
 
     if (req.table_info_selector.want_iceberg_table) {
-      resp.table_info.setIceberg_table(Utils.getTIcebergTable(this));
+      resp.table_info.setIceberg_table(Utils.getTIcebergTable(this,
+          ThriftObjectType.DESCRIPTOR_ONLY));
+      resp.table_info.iceberg_table.setCatalog_snapshot_id(catalogSnapshotId_);
+    }
+
+    if (req.table_info_selector.want_iceberg_table
+        && req.table_info_selector.want_partition_files) {
+      // Only apply pagination if the coordinator explicitly opted in by setting
+      // iceberg_file_offset. This ensures callers that don't support pagination
+      // always receive the full file set.
+      boolean paginationRequested = req.table_info_selector.isSetIceberg_file_offset();
+      long fileOffset = paginationRequested
+          ? req.table_info_selector.iceberg_file_offset : 0;
+      long fileLimit = paginationRequested
+          ? BackendConfig.INSTANCE.getCatalogPartialFetchMaxFiles() : Long.MAX_VALUE;
+
+      long totalFiles = getContentFileStore().getNumFiles();
+
+      // Get partial content file store
+      TIcebergContentFileStore partialContentFiles =
+          getContentFileStore().toThriftPartial(fileOffset, fileLimit);
+
+      // Count files actually returned
+      long filesReturned =
+          IcebergContentFileStore.countContentFiles(partialContentFiles);
+
+      resp.table_info.iceberg_table.setContent_files(partialContentFiles);
+
+      // On the first request, include total file count so the coordinator knows
+      // upfront how many pages to expect, avoiding a trailing empty RPC.
+      if (fileOffset == 0) {
+        partialContentFiles.setTotal_file_count(totalFiles);
+      }
+      if (filesReturned < totalFiles) {
+        LOG.warn("Returning {}/{} files for Iceberg table {} (offset {}). " +
+                "Coordinator will fetch remaining files in follow-up requests.",
+            filesReturned, totalFiles, getFullName(), fileOffset);
+      }
+
       if (!resp.table_info.isSetNetwork_addresses()) {
         resp.table_info.setNetwork_addresses(getHostIndex().getList());
       }
-      resp.table_info.iceberg_table.setCatalog_snapshot_id(catalogSnapshotId_);
     }
+
     return resp;
   }
 

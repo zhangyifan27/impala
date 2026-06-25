@@ -21,12 +21,10 @@
 # TODO: Re-factor tests into multiple classes.
 # TODO: Add a test that cancels queries while a retry is running
 
-from __future__ import absolute_import, division, print_function
 from random import randint
 import re
 import time
 
-from builtins import map, range
 import pytest
 
 from impala_thrift_gen.RuntimeProfile.ttypes import TRuntimeProfileFormat
@@ -1250,13 +1248,17 @@ class TestQueryRetriesFaultyDisk(CustomClusterTestSuite):
       order by o_orderdate
       """
 
-  def setup_method(self, method):  # noqa: U100
+  def setup_method(self, method):
     # Don't call the superclass method to prevent starting Impala before each test. In
     # this class, each test is responsible for doing that because we want to generate
-    # the parameter string to start-impala-cluster in each test method.
-    pass
+    # the parameter string to start-impala-cluster in each test method. This is still
+    # required to call the ImpalaTestSuite::setup_method() (and corresponding
+    # teardown_method()).
+    ImpalaTestSuite.setup_method(self, method)
 
-  def teardown_method(self, method):  # noqa: U100
+  def teardown_method(self, method):
+    # See comment in setup_method()
+    ImpalaTestSuite.teardown_method(self, method)
     self.clear_tmp_dirs()
 
   def __generate_scratch_dir(self, num):

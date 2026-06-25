@@ -28,8 +28,6 @@
 # be an int (2). The following line changes this behavior so that float will be returned
 # if necessary (2.5).
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import difflib
 import json
 import logging
@@ -40,6 +38,7 @@ import re
 from collections import defaultdict
 from datetime import date
 from optparse import OptionParser
+from urllib.request import Request, urlopen
 from tests.util.calculation_util import (
     calculate_tval, calculate_avg, calculate_stddev, calculate_geomean, calculate_mwu)
 
@@ -239,17 +238,12 @@ def all_query_results(grouped):
 
 
 def get_commit_date(commit_sha):
-  try:
-    from urllib.request import Request, urlopen
-  except ImportError:
-    from urllib2 import Request, urlopen
-
   url = 'https://api.github.com/repos/apache/impala/commits/' + commit_sha
   try:
     request = Request(url)
-    response = urlopen(request).read()
-    data = json.loads(response.decode('utf8'))
-    return data['commit']['committer']['date'][:10]
+    with urlopen(request).read() as response:
+      data = json.loads(response.decode('utf8'))
+      return data['commit']['committer']['date'][:10]
   except Exception:
     return ''
 

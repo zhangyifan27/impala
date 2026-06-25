@@ -68,8 +68,17 @@ class AdmissionExecRequest {
   /// Avoids Status checks, DCHECKs if called on compressed requests.
   virtual const TQueryExecRequest* request() const = 0;
 
+  // Returns the query options. For compressed requests, this returns a cached
+  // copy to help unnecessary decompression.
+  virtual const TQueryOptions& GetQueryOptions() const = 0;
+
   /// For compressed only, clears the cached decompressed object to save memory.
-  virtual void ClearDecompressedCache() const = 0;
+  /// Returns true if cache is empty, returns false if no compressed data or non-empty
+  /// after operation.
+  virtual bool ClearDecompressedCache() const = 0;
+
+  /// Returns if the request is compressed
+  virtual bool IsCompressed() const = 0;
 };
 
 class AdmissionExecRequestUncompressed : public AdmissionExecRequest {
@@ -88,9 +97,17 @@ class AdmissionExecRequestUncompressed : public AdmissionExecRequest {
     return req_;
   }
 
-  void ClearDecompressedCache() const override {
-    // we don't have a compressed data, so don't need to do anything.
+  const TQueryOptions& GetQueryOptions() const override {
+    DCHECK(req_ != nullptr);
+    return req_->query_ctx.client_request.query_options;
   }
+
+  bool ClearDecompressedCache() const override {
+    // we don't have a compressed data, so return false.
+    return false;
+  }
+
+  bool IsCompressed() const override { return false; }
 
  private:
   const TQueryExecRequest* req_;
@@ -114,14 +131,23 @@ class AdmissionExecRequestCompressed : public AdmissionExecRequest {
     return nullptr;
   }
 
-  void ClearDecompressedCache() const override {
+  const TQueryOptions& GetQueryOptions() const override {
+    std::lock_guard<std::mutex> l(lock_);
+    DCHECK(!first_decompress_) << "GetQueryOptions() called before first decompression";
+    return cached_query_options_;
+  }
+
+  bool ClearDecompressedCache() const override {
     std::lock_guard<std::mutex> l(lock_);
     if (decompressed_req_) {
       LOG(INFO) << "Cleared the decompressed request for query "
                 << PrintId(decompressed_req_->query_ctx.query_id);
       decompressed_req_.reset();
     }
+    return true;
   }
+
+  bool IsCompressed() const override { return true; }
 
  private:
   const TQueryExecRequestCompressed* req_;
@@ -129,6 +155,7 @@ class AdmissionExecRequestCompressed : public AdmissionExecRequest {
   mutable std::mutex lock_;
   mutable std::unique_ptr<TQueryExecRequest> decompressed_req_;
   mutable bool first_decompress_ = true;
+  mutable TQueryOptions cached_query_options_;
 };
 
 /// The AdmissionController is used to throttle requests (e.g. queries, DML) based
@@ -186,10 +213,10 @@ class AdmissionExecRequestCompressed : public AdmissionExecRequest {
 /// memory limit and a lower bound is enforced on it based on the largest initial
 /// reservation of the query. The final memory limit used is also clamped by the max/min
 /// memory limits configured for the pool with an option to not enforce these limits on
-/// the MEM_LIMIT query option (If both these max/min limits are not configured, then the
-/// estimates from planning are not used as a memory limit and are only used for making
-/// admission decisions. Moreover the estimates will no longer have a lower bound based on
-/// the largest initial reservation).
+/// the MEM_LIMIT query option (If no max_mem_resources, and no min/max limits are
+/// configured for the pool, then the estimates from planning are not used as a memory
+/// limit and are only used for making admission decisions. Moreover, the estimates will
+/// no longer have a lower bound based on the largest initial reservation).
 /// The following four conditions must hold in order for the request to be admitted:
 ///  1) The current pool configuration is valid.
 ///  2) There must be enough memory resources available in this resource pool for the
@@ -575,6 +602,7 @@ class AdmissionController {
  private:
   class PoolStats;
   friend class PoolStats;
+  friend class AdmissionExecRequestCompressed;
 
   /// Pointer to the cluster membership manager. Not owned by the AdmissionController.
   ClusterMembershipMgr* cluster_membership_mgr_;
@@ -624,6 +652,10 @@ class AdmissionController {
   /// issue on the coordinator (which therefore cannot be resolved by adding more
   /// executor groups).
   IntCounter* total_dequeue_failed_coordinator_limited_ = nullptr;
+
+  /// MemTracker tracking the size of uncompressed requests that have been approved for
+  /// decompression, but haven't been allocated by tcmalloc yet.
+  mutable std::unique_ptr<MemTracker> pending_decompression_mem_tracker_;
 
   /// Histograms for tracking the compressed/uncompressed sizes and compression ratios
   /// of the admission requests of TQueryExecRequest.
@@ -1211,7 +1243,7 @@ class AdmissionController {
   /// enough memory resources available for the query. Caller owns not_admitted_reason and
   /// not_admitted_details. Must hold admission_ctrl_lock_.
   bool CanAdmitRequest(const ScheduleState& state, const TPoolConfig& pool_cfg,
-      const TPoolConfig& root_cfg, bool admit_from_queue, string* not_admitted_reason,
+      bool admit_from_queue, string* not_admitted_reason,
       string* not_admitted_details, bool& coordinator_resource_limited);
 
   /// Returns true if User Quotas allow the schedule to be admitted to the pool with
@@ -1481,6 +1513,7 @@ class AdmissionController {
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestMemory);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestSlots);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestSlotsDefault);
+  FRIEND_TEST(AdmissionControllerTest, CanAdmitWhenOnlyMaxMemResourcesSet);
   FRIEND_TEST(AdmissionControllerTest, DedicatedCoordAdmissionChecks);
   FRIEND_TEST(AdmissionControllerTest, DedicatedCoordScheduleState);
   FRIEND_TEST(AdmissionControllerTest, DequeueLoop);

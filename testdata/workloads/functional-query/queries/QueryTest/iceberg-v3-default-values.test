@@ -1,0 +1,688 @@
+====
+---- QUERY
+# Test Iceberg V3 default values across multiple file formats
+#
+# This test covers:
+# - Parquet: Full read (initial-default)
+# - ORC: Read (initial-default) support only
+# - Avro: Read (initial-default) support only
+#
+# Note: Impala only supports writing to Parquet format Iceberg tables.
+# ORC and Avro formats are read-only for Iceberg in Impala.
+
+# Test initial-default values for Parquet format
+# Column 'j' has initial-default = -1 and write-default = -999
+# First row: i=1, j is missing (should use initial-default -1)
+# Second row: i=2, j=2 (explicit value)
+SELECT * FROM iceberg_v3_default_value ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test initial-default values for ORC format
+SELECT * FROM iceberg_v3_default_value_orc ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test initial-default values for Avro format
+SELECT * FROM iceberg_v3_default_value_avro ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Parquet: Filter exactly on the initial-default value
+SELECT i, j FROM iceberg_v3_default_value WHERE j = -1 ORDER BY i;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# ORC: Filter exactly on the initial-default value
+SELECT i, j FROM iceberg_v3_default_value_orc WHERE j = -1 ORDER BY i;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Avro: Filter exactly on the initial-default value
+SELECT i, j FROM iceberg_v3_default_value_avro WHERE j = -1 ORDER BY i;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Parquet: Filter exactly on explicit value
+SELECT i, j FROM iceberg_v3_default_value WHERE j > 0 ORDER BY i;
+---- RESULTS
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# ORC: Filter exactly on explicit value
+SELECT i, j FROM iceberg_v3_default_value_orc WHERE j > 0 ORDER BY i;
+---- RESULTS
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Avro: Filter exactly on explicit value
+SELECT i, j FROM iceberg_v3_default_value_avro WHERE j > 0 ORDER BY i;
+---- RESULTS
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Parquet: initial-default is a real INT, not SQL NULL — no rows match j IS NULL
+SELECT i, j FROM iceberg_v3_default_value WHERE j IS NULL ORDER BY i;
+---- RESULTS
+---- TYPES
+INT,INT
+====
+---- QUERY
+# ORC: no NULL j after default fill
+SELECT i, j FROM iceberg_v3_default_value_orc WHERE j IS NULL ORDER BY i;
+---- RESULTS
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Avro: no NULL j after default fill
+SELECT i, j FROM iceberg_v3_default_value_avro WHERE j IS NULL ORDER BY i;
+---- RESULTS
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Parquet: verify all materialized defaults and explicitly stored values evaluate to NOT NULL
+SELECT i, j FROM iceberg_v3_default_value WHERE j IS NOT NULL ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# ORC: verify NOT NULL evaluation
+SELECT i, j FROM iceberg_v3_default_value_orc WHERE j IS NOT NULL ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Avro: verify NOT NULL evaluation
+SELECT i, j FROM iceberg_v3_default_value_avro WHERE j IS NOT NULL ORDER BY i;
+---- RESULTS
+1,-1
+2,2
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Parquet: Compound predicate pushdown testing
+SELECT i, j FROM iceberg_v3_default_value WHERE i = 1 AND j = -1;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# ORC: Compound predicate pushdown testing
+SELECT i, j FROM iceberg_v3_default_value_orc WHERE i = 1 AND j = -1;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Avro: Compound predicate pushdown testing
+SELECT i, j FROM iceberg_v3_default_value_avro WHERE i = 1 AND j = -1;
+---- RESULTS
+1,-1
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Time travel — first snapshot: schema had only i
+SELECT * FROM iceberg_v3_default_value FOR SYSTEM_VERSION AS OF 7752776210164022855;
+---- RESULTS
+1
+---- TYPES
+INT
+====
+---- QUERY
+# Time travel — ORC first snapshot (schema without j)
+SELECT * FROM iceberg_v3_default_value_orc FOR SYSTEM_VERSION AS OF 1536392834658079256;
+---- RESULTS
+1
+---- TYPES
+INT
+====
+---- QUERY
+# Time travel — Avro first snapshot (schema without j)
+SELECT * FROM iceberg_v3_default_value_avro FOR SYSTEM_VERSION AS OF 2819462914350205316;
+---- RESULTS
+1
+---- TYPES
+INT
+====
+---- QUERY
+# Tests Iceberg V3 `initial-default` read projection against partition evolution.
+# Validates that the scanner correctly projects the read default value for older unpartitioned files,
+# while successfully overriding it with partition key values (or explicit NULLs) for newly partitioned data files.
+
+# Table was created initially with column 'i' and records (1), (2) were inserted.
+# It was then partitioned on the newly added column 'j'. Has initial-default = -1 and write-default = -999
+# Three new records (3,5), (4,10) & (5,NULL) were inserted.
+# For row: i=1 & i=2, j is missing (should use initial-default -1)
+# For others, it must use the partition key value, explicit NULL
+SELECT * FROM test_default_part ORDER BY i;
+---- RESULTS
+1,-1
+2,-1
+3,5
+4,10
+5,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test Case 2: Filter on the Default Value
+# This validates that partition pruning doesn't accidentally skip old files
+# that lack partition metadata for j.
+SELECT i FROM test_default_part WHERE j = -1 ORDER BY i;
+---- RESULTS
+1
+2
+---- TYPES
+INT
+====
+---- QUERY
+# Test Case 3: Filter on the Partition Key
+# This tests that expression evaluation works correctly on the newly partitioned
+# data and doesn't get confused by the initial default.
+SELECT i FROM test_default_part WHERE j = 5;
+---- RESULTS
+3
+---- TYPES
+INT
+====
+---- QUERY
+# Test Case 4: Aggregation and Grouping
+SELECT j, COUNT(i) as row_count
+FROM test_default_part
+GROUP BY j
+ORDER BY j;
+---- RESULTS
+-1,2
+5,1
+10,1
+NULL,1
+---- TYPES
+INT,BIGINT
+====
+---- QUERY
+# Table test_complex_default has three columns:
+# i (int), j STRUCT<f1: INT, f2: STRING>, ts_tz TIMESTAMPTZ
+# Nested field j.f1 with an int initial-default in metadata.
+# Selecting only column i should succeed because j is not materialized.
+SELECT i FROM test_complex_default ORDER BY i;
+---- RESULTS
+1
+2
+---- TYPES
+INT
+====
+---- QUERY
+# Nested field j.f2 does not have any initial-default in metadata.
+# Selecting the nested field j.f2 specifically should succeed.
+SELECT j.f2 FROM test_complex_default;
+---- RESULTS
+'hello'
+'NULL'
+---- TYPES
+STRING
+====
+---- QUERY
+SELECT f2 FROM (SELECT j.f1 as f1, j.f2 as f2 FROM test_complex_default) v;
+---- RESULTS
+'hello'
+'NULL'
+---- TYPES
+STRING
+====
+---- QUERY
+# Negative-epoch TIMESTAMP initial-default (microseconds before Unix epoch) for id=1.
+SELECT id, col_timestamp FROM iceberg_v3_all_types WHERE id = 1;
+---- RESULTS
+1,1969-12-31 23:59:59.123456000
+---- TYPES
+INT,TIMESTAMP
+====
+---- QUERY
+# Test all supported primitive types with initial-default values
+# Row 1: Uses initial-default for all columns (id=1 inserted before schema evolution)
+# Row 2: Explicit values override defaults (id=2 inserted after adding columns)
+#
+# Tests initial-default for: BOOLEAN, INT, BIGINT, FLOAT, DOUBLE, DECIMAL,
+# STRING, DATE, TIMESTAMP (pre-epoch, epoch, ISO)
+# col_timestamp_epoch / col_timestamp_iso: not present in older data files,
+# so both rows use their initial-default from metadata.
+SELECT id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal,
+    col_string, col_date, col_timestamp, col_timestamp_epoch, col_timestamp_iso
+FROM iceberg_v3_all_types ORDER BY id;
+---- RESULTS
+1,false,-1,-1,1.5,2.5,123.45,'initial_default',2024-01-01,1969-12-31 23:59:59.123456000,1970-01-01 00:00:00,2024-01-15 10:30:45.123456000
+2,true,42,9999999999,3.140000104904175,2.71828,999.99,'explicit',2024-12-25,2024-12-25 10:30:45.123456000,1970-01-01 00:00:00,2024-01-15 10:30:45.123456000
+---- TYPES
+INT,BOOLEAN,INT,BIGINT,FLOAT,DOUBLE,DECIMAL,STRING,DATE,TIMESTAMP,TIMESTAMP,TIMESTAMP
+====
+---- QUERY
+# Test write-default: INSERT omitting column j should use write-default value -999
+# Column j has initial-default=-1 and write-default=-999 in metadata
+INSERT INTO iceberg_v3_default_value (i) VALUES (100);
+SELECT i, j FROM iceberg_v3_default_value WHERE i = 100;
+---- RESULTS
+100,-999
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test write-default with explicit value
+# Explicitly providing a value should override write-default
+INSERT INTO iceberg_v3_default_value VALUES (101, 50);
+SELECT i, j FROM iceberg_v3_default_value WHERE i = 101;
+---- RESULTS
+101,50
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test write-default with explicit NULL
+# Explicitly specifying NULL should write NULL, not the write-default
+INSERT INTO iceberg_v3_default_value VALUES (102, NULL);
+SELECT i, j FROM iceberg_v3_default_value WHERE i = 102;
+---- RESULTS
+102,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Verify all inserted rows with defaults
+SELECT i, j FROM iceberg_v3_default_value WHERE i >= 100 ORDER BY i;
+---- RESULTS
+100,-999
+101,50
+102,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test write-default on test_default_part: INSERT omitting partitioned column j should use write-default value -999
+# Column j has initial-default=-1 and write-default=-999 in metadata
+# Since j is a partition column, the write-default also determines the partition
+INSERT INTO test_default_part (i) VALUES (100);
+SELECT i, j FROM test_default_part WHERE i = 100;
+---- RESULTS
+100,-999
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test write-default on test_default_part with explicit partition value
+# Explicitly providing partition value should override write-default
+INSERT INTO test_default_part VALUES (101, 50);
+SELECT i, j FROM test_default_part WHERE i = 101;
+---- RESULTS
+101,50
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Test write-default on test_default_part with explicit NULL partition
+# Explicitly specifying NULL for partition column should write NULL, not the write-default
+INSERT INTO test_default_part VALUES (102, NULL);
+SELECT i, j FROM test_default_part WHERE i = 102;
+---- RESULTS
+102,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Verify all inserted rows with write-default on partitioned table
+SELECT i, j FROM test_default_part WHERE i >= 100 ORDER BY i;
+---- RESULTS
+100,-999
+101,50
+102,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# Supported write-default types: BOOLEAN, INT, BIGINT, FLOAT, DOUBLE, DECIMAL, STRING, DATE
+# NOT supported: TIMESTAMP, BINARY
+#
+# write-default values:
+# - col_boolean: true, col_int: -999, col_bigint: -999999999
+# - col_float: 9.99, col_double: 8.88, col_decimal: 999.99
+# - col_string: 'write_default', col_date: '2024-12-31'
+INSERT INTO iceberg_v3_all_types (id, col_timestamp, col_binary)
+VALUES (100, CAST('2024-01-01 00:00:00' AS TIMESTAMP), CAST(unhex('CAFEBABE') AS BINARY));
+SELECT id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date
+FROM iceberg_v3_all_types WHERE id = 100;
+---- RESULTS
+100,true,-999,-999999999,9.989999771118164,8.88,999.99,'write_default',2024-12-31
+---- TYPES
+INT,BOOLEAN,INT,BIGINT,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# Test write-default with explicit values - explicit values should override write-default
+# Column list omits col_timestamp_epoch / col_timestamp_iso (initial-default only); those use NULL.
+INSERT INTO iceberg_v3_all_types (
+    id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date,
+    col_timestamp, col_binary)
+VALUES
+  (101, true, 123, 456789, 1.23, 4.56, 78.90, 'custom',
+  CAST('2025-06-15' AS DATE), CAST('2025-06-15 12:34:56.123456' AS TIMESTAMP), CAST(unhex('ABCD1234') AS BINARY));
+SELECT id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date
+FROM iceberg_v3_all_types WHERE id = 101;
+---- RESULTS
+101,true,123,456789,1.2300000190734863,4.56,78.90,'custom',2025-06-15
+---- TYPES
+INT,BOOLEAN,INT,BIGINT,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# Test write-default with explicit NULL - NULL should override write-default
+INSERT INTO iceberg_v3_all_types (
+    id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date,
+    col_timestamp, col_binary)
+VALUES
+  (102, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  CAST('2024-01-01 00:00:00' AS TIMESTAMP), CAST(unhex('DEADBEEF') AS BINARY));
+SELECT id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date
+FROM iceberg_v3_all_types WHERE id = 102;
+---- RESULTS
+102,NULL,NULL,NULL,NULL,NULL,NULL,'NULL',NULL
+---- TYPES
+INT,BOOLEAN,INT,BIGINT,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# Verify all rows with write-default insertions
+SELECT id, col_boolean, col_int, col_bigint, col_float, col_double, col_decimal, col_string, col_date
+FROM iceberg_v3_all_types
+WHERE id >= 100
+ORDER BY id;
+---- RESULTS
+100,true,-999,-999999999,9.989999771118164,8.88,999.99,'write_default',2024-12-31
+101,true,123,456789,1.2300000190734863,4.56,78.90,'custom',2025-06-15
+102,NULL,NULL,NULL,NULL,NULL,NULL,'NULL',NULL
+---- TYPES
+INT,BOOLEAN,INT,BIGINT,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# DDL CREATE: DEFAULT values directly specified in CREATE TABLE DDL.
+CREATE TABLE iceberg_ddl_create_defaults (
+  id INT,
+  i_col INT DEFAULT -1,
+  bi_col BIGINT DEFAULT 123456789012345,
+  bool_col BOOLEAN DEFAULT true,
+  float_col FLOAT DEFAULT CAST(3.14 AS FLOAT),
+  double_col DOUBLE DEFAULT CAST(2.718281828 AS DOUBLE),
+  dec_col DECIMAL(10,2) DEFAULT CAST(99.99 AS DECIMAL(10,2)),
+  str_col STRING DEFAULT 'hello',
+  d_col DATE DEFAULT CAST('2024-01-15' AS DATE)
+)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+====
+---- QUERY
+# INSERT omitting columns uses CREATE-time write-defaults.
+INSERT INTO iceberg_ddl_create_defaults (id) VALUES (1000);
+SELECT * FROM iceberg_ddl_create_defaults WHERE id = 1000;
+---- RESULTS
+1000,-1,123456789012345,true,3.140000104904175,2.718281828,99.99,'hello',2024-01-15
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# INSERT with explicit values overrides write-defaults.
+INSERT INTO iceberg_ddl_create_defaults VALUES (
+  2001, -2, 999, false, CAST(1.5 AS FLOAT), 1.25, CAST(12.34 AS DECIMAL(10,2)), 'explicit', CAST('2025-01-01' AS DATE));
+SELECT * FROM iceberg_ddl_create_defaults WHERE id = 2001;
+---- RESULTS
+2001,-2,999,false,1.5,1.25,12.34,'explicit',2025-01-01
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# DDL ADD COLUMN: all supported scalar types with DEFAULT on existing data.
+CREATE TABLE iceberg_ddl_add_defaults (id INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO iceberg_ddl_add_defaults VALUES (10);
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN i_col INT DEFAULT -1;
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN bi_col BIGINT DEFAULT 123456789012345;
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN bool_col BOOLEAN DEFAULT true;
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN float_col FLOAT DEFAULT CAST(3.14 AS FLOAT);
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN double_col DOUBLE DEFAULT CAST(2.718281828 AS DOUBLE);
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN dec_col DECIMAL(10,2) DEFAULT CAST(99.99 AS DECIMAL(10,2));
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN str_col STRING DEFAULT 'hello';
+ALTER TABLE iceberg_ddl_add_defaults ADD COLUMN d_col DATE DEFAULT CAST('2024-01-15' AS DATE);
+SELECT * FROM iceberg_ddl_add_defaults ORDER BY id;
+---- RESULTS
+10,-1,123456789012345,true,3.140000104904175,2.718281828,99.99,'hello',2024-01-15
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# ADD COLUMN initial-default on read; partial INSERT uses write-default.
+INSERT INTO iceberg_ddl_add_defaults (id, str_col) VALUES (30, 'custom');
+SELECT * FROM iceberg_ddl_add_defaults WHERE id = 30;
+---- RESULTS
+30,-1,123456789012345,true,3.140000104904175,2.718281828,99.99,'custom',2024-01-15
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# INSERT with explicit values overrides write-defaults.
+INSERT INTO iceberg_ddl_add_defaults VALUES (
+  40, -2, 999, false, CAST(1.5 AS FLOAT), 1.25, CAST(12.34 AS DECIMAL(10,2)), 'all_explicit', CAST('2025-01-01' AS DATE));
+SELECT * FROM iceberg_ddl_add_defaults WHERE id = 40;
+---- RESULTS
+40,-2,999,false,1.5,1.25,12.34,'all_explicit',2025-01-01
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# ALTER COLUMN SET DEFAULT on all scalar types (no defaults at CREATE).
+CREATE TABLE iceberg_ddl_alter_defaults (
+  id INT,
+  i_col INT,
+  bi_col BIGINT,
+  bool_col BOOLEAN,
+  float_col FLOAT,
+  double_col DOUBLE,
+  dec_col DECIMAL(10,2),
+  str_col STRING,
+  d_col DATE
+)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO iceberg_ddl_alter_defaults (id) VALUES (1);
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN i_col SET DEFAULT -1;
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN bi_col SET DEFAULT 123456789012345;
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN bool_col SET DEFAULT true;
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN float_col SET DEFAULT CAST(3.14 AS FLOAT);
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN double_col SET DEFAULT CAST(2.718281828 AS DOUBLE);
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN dec_col SET DEFAULT CAST(99.99 AS DECIMAL(10,2));
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN str_col SET DEFAULT 'hello';
+ALTER TABLE iceberg_ddl_alter_defaults ALTER COLUMN d_col SET DEFAULT CAST('2024-01-15' AS DATE);
+====
+---- QUERY
+# Row before SET DEFAULT stays NULL; omitting columns after SET uses write-defaults.
+INSERT INTO iceberg_ddl_alter_defaults (id) VALUES (2);
+INSERT INTO iceberg_ddl_alter_defaults VALUES (
+  3, -2, 999, false, CAST(1.5 AS FLOAT), 1.25, CAST(12.34 AS DECIMAL(10,2)), 'explicit', CAST('2025-01-01' AS DATE));
+SELECT * FROM iceberg_ddl_alter_defaults ORDER BY id;
+---- RESULTS
+1,NULL,NULL,NULL,NULL,NULL,NULL,'NULL',NULL
+2,-1,123456789012345,true,3.140000104904175,2.718281828,99.99,'hello',2024-01-15
+3,-2,999,false,1.5,1.25,12.34,'explicit',2025-01-01
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====
+---- QUERY
+# ALTER COLUMN DROP DEFAULT: clears write-default; CREATE-time initial-default unchanged.
+CREATE TABLE iceberg_ddl_drop_default (
+  id INT,
+  j INT DEFAULT 7,
+  s STRING DEFAULT 'def'
+)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO iceberg_ddl_drop_default (id) VALUES (1);
+ALTER TABLE iceberg_ddl_drop_default ALTER COLUMN j DROP DEFAULT;
+INSERT INTO iceberg_ddl_drop_default (id) VALUES (2);
+SELECT * FROM iceberg_ddl_drop_default ORDER BY id;
+---- RESULTS
+1,7,'def'
+2,NULL,'def'
+---- TYPES
+INT,INT,STRING
+====
+---- QUERY
+# DROP DEFAULT after ADD COLUMN: initial-default still backfills old rows on read.
+CREATE TABLE iceberg_ddl_drop_add (id INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO iceberg_ddl_drop_add VALUES (10);
+ALTER TABLE iceberg_ddl_drop_add ADD COLUMN j INT DEFAULT 100;
+ALTER TABLE iceberg_ddl_drop_add ALTER COLUMN j DROP DEFAULT;
+INSERT INTO iceberg_ddl_drop_add (id) VALUES (20);
+SELECT * FROM iceberg_ddl_drop_add ORDER BY id;
+---- RESULTS
+10,100
+20,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# MERGE INSERT: omitted column with write-default should use write-default, not NULL.
+# iceberg_v3_default_value has columns (i INT, j INT) where j has write-default=-999.
+CREATE TABLE merge_wd_target (i INT, j INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+ALTER TABLE merge_wd_target ALTER COLUMN j SET DEFAULT -999;
+INSERT INTO merge_wd_target VALUES (1, 10);
+CREATE TABLE merge_wd_source (i INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO merge_wd_source VALUES (2), (3);
+
+# MERGE INSERT with column permutation omitting j: j should get write-default -999
+MERGE INTO merge_wd_target USING merge_wd_source
+ON merge_wd_target.i = merge_wd_source.i
+WHEN NOT MATCHED THEN INSERT (i) VALUES (merge_wd_source.i);
+SELECT * FROM merge_wd_target ORDER BY i;
+---- RESULTS
+1,10
+2,-999
+3,-999
+---- TYPES
+INT,INT
+====
+---- QUERY
+# MERGE INSERT with all columns specified: write-default not used when value is explicit
+CREATE TABLE merge_wd_target2 (i INT, j INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+ALTER TABLE merge_wd_target2 ALTER COLUMN j SET DEFAULT -999;
+INSERT INTO merge_wd_target2 VALUES (1, 10);
+CREATE TABLE merge_wd_source2 (i INT, j INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO merge_wd_source2 VALUES (2, 42), (3, 99);
+
+MERGE INTO merge_wd_target2 USING merge_wd_source2
+ON merge_wd_target2.i = merge_wd_source2.i
+WHEN NOT MATCHED THEN INSERT VALUES (merge_wd_source2.i, merge_wd_source2.j);
+SELECT * FROM merge_wd_target2 ORDER BY i;
+---- RESULTS
+1,10
+2,42
+3,99
+---- TYPES
+INT,INT
+====
+---- QUERY
+# MERGE INSERT with explicit NULL: NULL overrides write-default
+CREATE TABLE merge_wd_target3 (i INT, j INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+ALTER TABLE merge_wd_target3 ALTER COLUMN j SET DEFAULT -999;
+INSERT INTO merge_wd_target3 VALUES (1, 10);
+CREATE TABLE merge_wd_source3 (i INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO merge_wd_source3 VALUES (2);
+
+MERGE INTO merge_wd_target3 USING merge_wd_source3
+ON merge_wd_target3.i = merge_wd_source3.i
+WHEN NOT MATCHED THEN INSERT (i, j) VALUES (merge_wd_source3.i, NULL);
+SELECT * FROM merge_wd_target3 ORDER BY i;
+---- RESULTS
+1,10
+2,NULL
+---- TYPES
+INT,INT
+====
+---- QUERY
+# MERGE INSERT with multiple typed write-defaults.
+CREATE TABLE merge_wd_multi (
+  id INT,
+  i_col INT DEFAULT -999,
+  bi_col BIGINT DEFAULT 123456789,
+  bool_col BOOLEAN DEFAULT true,
+  float_col FLOAT DEFAULT CAST(7.88 AS FLOAT),
+  double_col DOUBLE DEFAULT CAST(2.7412818 AS DOUBLE),
+  dec_col DECIMAL(10,3) DEFAULT CAST(999.999 AS DECIMAL(10,3)),
+  str_col STRING DEFAULT 'hello_world',
+  d_col DATE DEFAULT CAST('2016-01-15' AS DATE)
+)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO merge_wd_multi VALUES (
+  1, -21, 987654321, false, CAST(7.5 AS FLOAT), 6.25, CAST(123.456 AS DECIMAL(10,3)), 'explicit_data', CAST('1955-06-11' AS DATE));
+CREATE TABLE merge_wd_multi_src (id INT)
+STORED AS ICEBERG
+TBLPROPERTIES ('format-version'='3');
+INSERT INTO merge_wd_multi_src VALUES (2), (3);
+
+MERGE INTO merge_wd_multi USING merge_wd_multi_src
+ON merge_wd_multi.id = merge_wd_multi_src.id
+WHEN NOT MATCHED THEN INSERT (id) VALUES (merge_wd_multi_src.id);
+SELECT * FROM merge_wd_multi ORDER BY id;
+---- RESULTS
+1,-21,987654321,false,7.5,6.25,123.456,'explicit_data',1955-06-11
+2,-999,123456789,true,7.880000114440918,2.7412818,999.999,'hello_world',2016-01-15
+3,-999,123456789,true,7.880000114440918,2.7412818,999.999,'hello_world',2016-01-15
+---- TYPES
+INT,INT,BIGINT,BOOLEAN,FLOAT,DOUBLE,DECIMAL,STRING,DATE
+====

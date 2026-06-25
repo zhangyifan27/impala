@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import pytest
 import socket
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
@@ -33,15 +32,13 @@ class TestKrpcOptions(CustomClusterTestSuite):
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args("--rpc_use_loopback=true")
-  def test_krpc_use_loopback(self, vector):
+  def test_krpc_use_loopback(self):
     """Sanity test for the --rpc_use_loopback flag."""
     # Run a query that will execute on multiple hosts.
     self.client.execute("select min(int_col) from functional_parquet.alltypes")
 
     # Check that we can connect on multiple interfaces.
-    sock = socket.socket()
-    sock.connect(("127.0.0.1", DEFAULT_KRPC_PORT))
-    sock.close()
-    sock = socket.socket()
-    sock.connect((socket.gethostname(), DEFAULT_KRPC_PORT))
-    sock.close()
+    with socket.socket() as sock:
+      sock.connect(("127.0.0.1", DEFAULT_KRPC_PORT))
+    with socket.socket() as sock:
+      sock.connect((socket.gethostname(), DEFAULT_KRPC_PORT))

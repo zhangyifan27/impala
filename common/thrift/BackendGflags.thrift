@@ -258,8 +258,6 @@ struct TBackendGflags {
 
   113: required double scan_range_cost_factor
 
-  114: required bool use_jamm_weigher
-
   116: required bool enable_skipping_older_events;
 
   117: required bool enable_json_scanner
@@ -363,4 +361,16 @@ struct TBackendGflags {
   166: required i32 max_stmt_metadata_loader_threads
 
   167: required bool disable_hms_sync_by_default
+
+  168: required i32 hms_event_catchup_threshold_s
+
+  169: required bool otel_trace_enabled
+
+  170: required double hbo_similarity_threshold
+
+  171: required i32 hbo_max_runs_per_key
+
+  172: required i64 hbo_in_memory_backend_cache_size_bytes
+
+  173: required i32 unregistration_thread_pool_size
 }

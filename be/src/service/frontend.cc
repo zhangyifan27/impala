@@ -138,6 +138,7 @@ Frontend::Frontend() {
     {"getCatalogTable", "([B)Lorg/apache/impala/catalog/FeTable;",
         &get_catalog_table_id_},
     {"getRoles", "([B)[B", &show_roles_id_},
+    {"getCurrentGroups", "([B)[B", &show_current_groups_id_},
     {"getPrincipalPrivileges", "([B)[B", &get_principal_privileges_id_},
     {"execHiveServer2MetadataOp", "([B)[B", &exec_hs2_metadata_op_id_},
     {"setCatalogIsReady", "()V", &set_catalog_is_ready_id_},
@@ -158,7 +159,8 @@ Frontend::Frontend() {
     {"abortKuduTransaction", "([B)V", &abort_kudu_txn_},
     {"commitKuduTransaction", "([B)V", &commit_kudu_txn_},
     {"cancelExecRequest", "([B)V", &cancel_exec_request_id_},
-    {"getNonOdbcKeywords", "([B)Ljava/lang/String;", &get_non_odbc_keywords_id_}
+    {"getNonOdbcKeywords", "([B)Ljava/lang/String;", &get_non_odbc_keywords_id_},
+    {"storeExecStats", "([B)V", &store_exec_stats_}
   };
 
   JniMethodDescriptor staticMethods[] = {
@@ -321,6 +323,11 @@ Status Frontend::ShowRoles(const TShowRolesParams& params, TShowRolesResult* res
   return JniUtil::CallJniMethod(fe_, show_roles_id_, params, result);
 }
 
+Status Frontend::ShowCurrentGroups(const TShowCurrentGroupsParams& params,
+  TShowCurrentGroupsResult* result) {
+  return JniUtil::CallJniMethod(fe_, show_current_groups_id_, params, result);
+}
+
 Status Frontend::GetCatalogObject(const TCatalogObject& req,
     TCatalogObject* resp) {
   return JniUtil::CallJniMethod(fe_, get_catalog_object_id_, req, resp);
@@ -477,4 +484,8 @@ Status Frontend::GetNonOdbcKeywords(const string& odbc_keywords_csv, string* res
   TStringLiteral csv;
   csv.__set_value(odbc_keywords_csv);
   return JniUtil::CallJniMethod(fe_, get_non_odbc_keywords_id_, csv, response);
+}
+
+Status Frontend::StoreExecStats(const THistoricalStatsUpdate& stats) {
+  return JniUtil::CallJniMethod(fe_, store_exec_stats_, stats);
 }

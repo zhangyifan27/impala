@@ -47,8 +47,10 @@
 #include "util/debug-util.h"
 #include "util/thread.h"
 #include "util/time.h"
+#include "util/malloc-util.h"
 #include "util/mem-info.h"
 #include "util/parse-util.h"
+#include "util/scope-exit-trigger.h"
 #include "util/test-info.h"
 #include "util/tuple-row-compare.h"
 #include "util/uid-util.h"
@@ -82,6 +84,7 @@ DECLARE_int32(datastream_service_deserialization_queue_size);
 DECLARE_string(datastream_service_queue_mem_limit);
 DECLARE_int32(datastream_service_num_svc_threads);
 DECLARE_string(debug_actions);
+DECLARE_bool(tcmalloc_aggressive_memory_decommit);
 
 static const PlanNodeId DEST_NODE_ID = 1;
 static const int BATCH_CAPACITY = 100;  // rows
@@ -89,6 +92,11 @@ static const int PER_ROW_DATA = 8;
 static const int TOTAL_DATA_SIZE = 8 * 1024;
 static const int NUM_BATCHES = TOTAL_DATA_SIZE / BATCH_CAPACITY / PER_ROW_DATA;
 static const int SHORT_SERVICE_QUEUE_MEM_LIMIT = 16;
+
+METRIC_DEFINE_histogram(server, data_stream_test_incoming_queue_time,
+    "Data Stream Test RPC Queue Time", kudu::MetricUnit::kMicroseconds,
+    "Number of microseconds incoming RPC requests spend in the worker queue",
+    kudu::MetricLevel::kInfo, 60000000LU, 3);
 
 namespace impala {
 
@@ -114,8 +122,10 @@ class ImpalaKRPCTestBackend : public DataStreamServiceIf {
     int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
         FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
     LOG(INFO) << "Num svc thread=" << num_svc_threads;
-    return rpc_mgr_->RegisterService(num_svc_threads, 1024, this, mem_tracker(),
-        ExecEnv::GetInstance()->rpc_metrics());
+    return rpc_mgr_->RegisterService(num_svc_threads, 1024,
+        METRIC_data_stream_test_incoming_queue_time.Instantiate(
+            rpc_mgr_->metric_entity()),
+        this, mem_tracker(), ExecEnv::GetInstance()->rpc_metrics());
   }
 
   virtual bool Authorize(const google::protobuf::Message* req,
@@ -176,6 +186,9 @@ class DataStreamTest : public testing::Test {
   virtual void SetUp() {
     exec_env_.reset(new ExecEnv());
     ABORT_IF_ERROR(exec_env_->InitForFeSupport());
+    // Always use aggressive decommit for backend tests
+    FLAGS_tcmalloc_aggressive_memory_decommit = true;
+    ABORT_IF_ERROR(MallocUtil::GetInstance()->Init(/*process_mem_limit*/ -1));
     exec_env_->InitBufferPool(32 * 1024, 1024 * 1024 * 1024, 32 * 1024);
     runtime_state_.reset(new RuntimeState(TQueryCtx(), exec_env_.get()));
     TPlanFragment* fragment = runtime_state_->obj_pool()->Add(new TPlanFragment());
@@ -423,10 +436,10 @@ class DataStreamTest : public testing::Test {
     }
   }
 
-  // Start receiver (expecting given number of senders) in separate thread.
+  // Start receiver expecting the given number of senders.
   void StartReceiver(TPartitionType::type stream_type, int num_senders, int receiver_num,
       int buffer_size, bool is_merging, TUniqueId* out_id = nullptr,
-      RuntimeProfile** out_profile = nullptr) {
+      RuntimeProfile** out_profile = nullptr, bool start_reader = true) {
     VLOG_QUERY << "start receiver";
     RuntimeProfile* profile = RuntimeProfile::Create(&obj_pool_, "TestReceiver");
     TUniqueId instance_id;
@@ -437,7 +450,9 @@ class DataStreamTest : public testing::Test {
     info->stream_recvr = stream_mgr_->CreateRecvr(row_desc_, *runtime_state_.get(),
         instance_id, DEST_NODE_ID, num_senders, buffer_size, is_merging, profile,
         &tracker_, &buffer_pool_client_);
-   if (!is_merging) {
+    if (!start_reader) {
+      DCHECK(!is_merging);
+    } else if (!is_merging) {
       info->thread_handle.reset(new thread(&DataStreamTest::ReadStream, this, info));
     } else {
       TupleRowComparator* less_than_comparator = nullptr;
@@ -451,10 +466,19 @@ class DataStreamTest : public testing::Test {
     if (out_profile != nullptr) *out_profile = profile;
   }
 
+  void StartReceiverWithoutReader(TPartitionType::type stream_type, int num_senders,
+      int receiver_num, int buffer_size, TUniqueId* out_id = nullptr,
+      RuntimeProfile** out_profile = nullptr) {
+    StartReceiver(stream_type, num_senders, receiver_num, buffer_size, false, out_id,
+        out_profile, false);
+  }
+
   void JoinReceivers() {
     VLOG_QUERY << "join receiver\n";
     for (int i = 0; i < receiver_info_.size(); ++i) {
-      receiver_info_[i]->thread_handle->join();
+      if (receiver_info_[i]->thread_handle != nullptr) {
+        receiver_info_[i]->thread_handle->join();
+      }
       receiver_info_[i]->stream_recvr->Close();
     }
   }
@@ -772,6 +796,49 @@ TEST_F(DataStreamTest, Cancel) {
   JoinReceivers();
   EXPECT_TRUE(receiver_info_[0]->status.IsCancelled());
   EXPECT_TRUE(receiver_info_[1]->status.IsCancelled());
+}
+
+TEST_F(DataStreamTest, TotalHasDeferredRpcsTimeIncludesOpenInterval) {
+  // Keep the receiver reader stopped so the sender defers an RPC. The IMPALA-14838
+  // regression test verifies TotalHasDeferredRPCsTime while the deferred-RPC interval
+  // is still open.
+  TUniqueId instance_id;
+  RuntimeProfile* profile = nullptr;
+  StartReceiverWithoutReader(TPartitionType::UNPARTITIONED, 1, 1, 1024, &instance_id,
+      &profile);
+  const auto cancel_and_join = MakeScopeExitTrigger([&]() {
+    stream_mgr_->Cancel(GetQueryId(instance_id));
+    JoinSenders();
+    JoinReceivers();
+  });
+
+  vector<RuntimeProfile::Counter*> total_deferred_rpcs_counters;
+  profile->GetCounters("TotalRPCsDeferred", &total_deferred_rpcs_counters);
+  ASSERT_EQ(1, total_deferred_rpcs_counters.size());
+  RuntimeProfile::Counter* total_deferred_rpcs = total_deferred_rpcs_counters[0];
+
+  vector<RuntimeProfile::Counter*> deferred_rpcs_time_counters;
+  profile->GetCounters("TotalHasDeferredRPCsTime", &deferred_rpcs_time_counters);
+  ASSERT_EQ(1, deferred_rpcs_time_counters.size());
+  RuntimeProfile::Counter* deferred_rpcs_time = deferred_rpcs_time_counters[0];
+
+  StartSender(TPartitionType::UNPARTITIONED, 1024);
+
+  int64_t waited_ms = 0;
+  while (total_deferred_rpcs->value() == 0 && waited_ms < 5000) {
+    SleepForMs(1);
+    ++waited_ms;
+  }
+  ASSERT_GT(total_deferred_rpcs->value(), 0);
+
+  int64_t open_interval_time = 0;
+  waited_ms = 0;
+  while ((open_interval_time = deferred_rpcs_time->value()) == 0 && waited_ms < 5000) {
+    SleepForMs(1);
+    ++waited_ms;
+  }
+
+  EXPECT_GT(open_interval_time, 0);
 }
 
 TEST_F(DataStreamTest, BasicTest) {

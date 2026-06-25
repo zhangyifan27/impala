@@ -50,6 +50,9 @@ public class StringLiteral extends LiteralExpr {
   private final byte[] binValue_;
   public static int MAX_STRING_LEN = Integer.MAX_VALUE;
 
+  public static final StringLiteral EMPTY_STRING_LITERAL =
+      new StringLiteral("");
+
   // Indicates whether this value needs to be unescaped in toThrift() or comparison.
   // TODO: Add enum to distinguish the sources, e.g. double/single quoted SQL, HMS view,
   //  or the result of an evaluated const expression. So we know whether we need
@@ -221,7 +224,7 @@ public class StringLiteral extends LiteralExpr {
       // Let the BE do the cast
       // - it is in Boost format in case target type is TIMESTAMP
       // - CCTZ is used for conversion in case target type is DATE.
-      return new CastExpr(targetType, this, compatibility);
+      return CastExpr.createImplicit(targetType, this, compatibility);
     }
     return this;
   }

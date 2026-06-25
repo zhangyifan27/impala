@@ -43,6 +43,7 @@
 #include "exprs/ai-functions-ir.cc"
 #include "exprs/bit-byte-functions-ir.cc"
 #include "exprs/cast-functions-ir.cc"
+#include "exprs/collection-functions-ir.cc"
 #include "exprs/compound-predicates-ir.cc"
 #include "exprs/conditional-functions-ir.cc"
 #include "exprs/datasketches-functions-ir.cc"

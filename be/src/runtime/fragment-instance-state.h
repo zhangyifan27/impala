@@ -18,6 +18,7 @@
 #pragma once
 
 #include <mutex>
+#include <set>
 #include <string>
 #include <boost/scoped_ptr.hpp>
 
@@ -154,6 +155,9 @@ class FragmentInstanceState {
   const std::map<int32_t, int64_t>& per_join_rows_produced() const {
     return per_join_rows_produced_;
   }
+  const std::set<std::pair<int32_t, int32_t>>& per_scan_effective_filters() const {
+    return per_scan_effective_filters_;
+  }
 
   /// Returns true if the current thread is a thread executing the whole or part of
   /// a fragment instance.
@@ -181,6 +185,7 @@ class FragmentInstanceState {
   /// in Prepare().
   ExecNode* exec_tree_ = nullptr; // lives in obj_pool()
   RuntimeState* runtime_state_ = nullptr;  // lives in obj_pool()
+  std::unordered_map<TPlanNodeId, ExecNode*> exec_node_map_;
 
   /// A 'fake mutex' to detect any race condition in accessing 'report_seq_no_' below.
   /// There should be only one thread doing status report at the same time.
@@ -221,6 +226,11 @@ class FragmentInstanceState {
   /// For each join node, sum of RowsReturned counters on this backend.
   /// Set in GetStatusReport().
   std::map<int32_t, int64_t> per_join_rows_produced_;
+
+  /// Effective filter targets at scan nodes in this fragment instance.
+  /// Updated in GetStatusReport(). Using a set to automatically handle duplicates across
+  /// periodic calls.
+  std::set<std::pair<int32_t, int32_t>> per_scan_effective_filters_;
 
   /// Profile for timings for each stage of the plan fragment instance's lifecycle.
   /// Lives in obj_pool().
@@ -337,6 +347,10 @@ class FragmentInstanceState {
 
   /// Print stats about scan ranges for each volumeId in params to info log.
   void PrintVolumeIds();
+
+  /// Sets last_batch_returned on 'summary_data' for plan node 'node_id'.
+  void SetLastBatchReturnedForPlanNode(
+      TPlanNodeId node_id, ExecSummaryDataPB* summary_data);
 };
 
 }

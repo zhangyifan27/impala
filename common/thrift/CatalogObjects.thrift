@@ -84,6 +84,7 @@ enum THdfsFileFormat {
   JSON = 9
   JDBC = 10
   PAIMON = 11
+  PUFFIN = 12
 }
 
 enum TVirtualColumnType {
@@ -94,7 +95,10 @@ enum TVirtualColumnType {
   ICEBERG_PARTITION_SERIALIZED,
   ICEBERG_DATA_SEQUENCE_NUMBER,
   PARTITION_VALUE_SERIALIZED,
-  BUCKET_ID
+  BUCKET_ID,
+  ICEBERG_FIRST_ROW_ID,
+  ICEBERG_ROW_ID,
+  ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER
 }
 
 // TODO: Since compression is also enabled for Kudu columns, we should
@@ -338,6 +342,11 @@ struct TColumn {
   // will reuse the iceberg_field_id, is_key, is_nullable
   // for Paimon table.
   26: optional bool is_paimon_column
+  // Iceberg V3 default value fields
+  27: optional string iceberg_initial_default
+  28: optional string iceberg_write_default
+  // When true, the write-default is removed from the Iceberg schema metadata.
+  29: optional bool iceberg_drop_write_default
 
 }
 
@@ -348,7 +357,7 @@ struct THdfsFileDesc {
   // TODO: Put this in a KRPC sidecar to avoid serialization cost.
   1: required binary file_desc_data
 
-  // Additional file metadata serialized into a FlatBuffer
+  // Additional file metadata serialized into a FlatBuffer (FbSplitFileMetadata)
   // TODO: Put this in a KRPC sidecar to avoid serialization cost.
   2: optional binary file_metadata
 }
@@ -646,11 +655,6 @@ struct TIcebergPartitionSpec {
   2: optional list<TIcebergPartitionField> partition_fields
 }
 
-struct TIcebergPartition {
-  1: required i32 spec_id
-  2: required list<string> partition_values
-}
-
 struct TIcebergPartitionStats {
   1: required i64 num_files;
   2: required i64 num_rows;
@@ -674,7 +678,13 @@ struct TIcebergContentFileStore {
   6: optional bool has_orc
   7: optional bool has_parquet
   8: optional list<string> missing_files
-  9: optional list<TIcebergPartition> partitions
+  // Partition metadata serialized into a FlatBuffer
+  // (FbIcebergPartition defined in common/fbs/IcebergObjects.fbs).
+  9: optional list<binary> partitions
+  10: optional map<THash128, Types.TIcebergDeletionVector> data_path_hash_to_dv
+  // Total number of files in this content file store. Only set in the first partial
+  // response (offset 0) so the coordinator knows upfront how many pages to expect.
+  11: optional i64 total_file_count
 }
 
 // Represents a drop partition request for Iceberg tables
@@ -707,6 +717,7 @@ struct TIcebergTable {
   8: optional i64 parquet_plain_page_size;
   9: optional i64 parquet_dict_page_size;
   10: optional map<string, TIcebergPartitionStats> partition_stats;
+  11: optional i32 format_version = -1;
 }
 
 // System Table identifiers.

@@ -525,7 +525,7 @@ public class AnalyzeDDLTest extends FrontendTestBase {
 
     // A not null is a Kudu only option..
     AnalysisError("alter table functional.alltypes add column new_col int not null",
-        "The specified column options are only supported in Kudu tables: " +
+        "The specified column options are only supported in Kudu and Iceberg tables: " +
         "new_col INT NOT NULL");
     // Paimon ADD COLUMN Test
     String paimon_partitioned =
@@ -618,7 +618,7 @@ public class AnalyzeDDLTest extends FrontendTestBase {
 
     // A not null is a Kudu only option..
     AnalysisError("alter table functional.alltypes add columns(new_col int not null)",
-        "The specified column options are only supported in Kudu tables: " +
+        "The specified column options are only supported in Kudu and Iceberg tables: " +
         "new_col INT NOT NULL");
     // Paimon ADD COLUMNS Test
     String paimon_partitioned =
@@ -2421,6 +2421,8 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalysisError("create database new_db managedlocation " +
         "'blah://bucket/test-warehouse/new_db'",
         "No FileSystem for scheme: blah");
+
+    AnalyzesOk("create database new_db with dbproperties('a'='b')");
   }
 
   @Test
@@ -3172,9 +3174,14 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     // Test HMS constraint on comment length.
     AnalyzesOk(String.format("create table t (i int comment '%s')",
         StringUtils.repeat("c", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH)));
+    AnalyzesOk(String.format("create table t (i int comment '%s')",
+        StringUtils.repeat("c", 500)));
+    AnalyzesOk(String.format("create table t (i int comment '%s')",
+        StringUtils.repeat("c", 1000)));
     AnalysisError(String.format("create table t (i int comment '%s')",
         StringUtils.repeat("c", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH + 1)),
-        "Comment of column 'i' exceeds maximum length of 256 characters:");
+        String.format("Comment of column 'i' exceeds maximum length of %d characters:",
+            MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH));
 
     // Valid URI values.
     AnalyzesOk("create table tbl (i int) location '/test-warehouse/new_table'");
@@ -4573,12 +4580,43 @@ public class AnalyzeDDLTest extends FrontendTestBase {
 
     // WHERE clause with Kudu table should fail (non-HDFS tables don't support WHERE)
     AnalysisError("show partitions functional_kudu.alltypes where year = 2009",
-        "WHERE clause in SHOW PARTITIONS is only supported for HDFS tables");
+        "WHERE clause in SHOW PARTITIONS is only supported for HDFS and Iceberg tables");
 
-    // WHERE clause with Iceberg table should fail
+    // Valid WHERE clauses with Iceberg tables
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned where i = 1");
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned " +
+        "where i > 1 and j < 30");
+    AnalyzesOk("show partitions functional_parquet.iceberg_partitioned " +
+        "where action = 'click'");
+
+    // Constant expressions in WHERE clause for Iceberg tables
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned where 1 = 1");
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned where 1 = 0");
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned where true");
+    AnalyzesOk("show partitions functional_parquet.iceberg_int_partitioned where false");
+
+    // Functions (deterministic or non-deterministic) are not supported for Iceberg tables
     AnalysisError("show partitions functional_parquet.iceberg_int_partitioned " +
-        "where i = 1",
-        "WHERE clause in SHOW PARTITIONS is only supported for HDFS tables");
+        "where rand() < 0.5",
+        "Invalid partition filtering expression: rand() < 0.5.\n" +
+        "Invalid partition predicate: rand()");
+    AnalysisError("show partitions functional_parquet.iceberg_int_partitioned " +
+        "where length(uuid()) > 30",
+        "Invalid partition filtering expression: length(uuid()) > 30.\n" +
+        "Invalid partition predicate: length(uuid())");
+    AnalysisError("show partitions functional_parquet.iceberg_int_partitioned " +
+        "where i = 1 and rand() < 1",
+        "Invalid partition filtering expression: i = 1 AND rand() < 1.\n" +
+        "Invalid partition predicate: rand()");
+    AnalysisError("show partitions functional_parquet.iceberg_int_partitioned " +
+        "where upper(cast(i as string)) = '1'",
+        "Invalid partition filtering expression: upper(CAST(i AS STRING)) = '1'.\n" +
+        "Invalid partition predicate: upper(CAST(i AS STRING))");
+
+    // Iceberg WHERE clause with partition field name should fail
+    AnalysisError("show partitions functional_parquet.iceberg_partitioned " +
+        "where event_time_hour = 438296",
+        "Could not resolve column/field reference: 'event_time_hour'");
 
     // WHERE clause must be a boolean expression
     AnalysisError("show partitions functional.alltypes where year",
@@ -4759,9 +4797,16 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     AnalyzesOk("comment on database functional is null");
     AnalysisError("comment on database doesntexist is 'comment'",
         "Database does not exist: doesntexist");
+    AnalyzesOk(String.format("comment on database functional is '%s'",
+        StringUtils.repeat("a", 500)));
+    AnalyzesOk(String.format("comment on database functional is '%s'",
+        StringUtils.repeat("a", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH)));
     AnalysisError(String.format("comment on database functional is '%s'",
-        buildLongComment()), "Comment exceeds maximum length of 256 characters. " +
-        "The given comment has 261 characters.");
+        buildLongComment()), String.format(
+        "Comment exceeds maximum length of %d characters. " +
+        "The given comment has %d characters.",
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH,
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH + 5));
   }
 
   @Test
@@ -4778,9 +4823,16 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "Could not resolve table reference: 'default.doesntexist'");
     AnalysisError("comment on table functional.alltypes_view is 'comment'",
         "COMMENT ON TABLE not allowed on a view: functional.alltypes_view");
+    AnalyzesOk(String.format("comment on table functional.alltypes is '%s'",
+        StringUtils.repeat("a", 500)));
+    AnalyzesOk(String.format("comment on table functional.alltypes is '%s'",
+        StringUtils.repeat("a", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH)));
     AnalysisError(String.format("comment on table functional.alltypes is '%s'",
-        buildLongComment()), "Comment exceeds maximum length of 256 characters. " +
-        "The given comment has 261 characters.");
+        buildLongComment()), String.format(
+        "Comment exceeds maximum length of %d characters. " +
+        "The given comment has %d characters.",
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH,
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH + 5));
   }
 
   @Test
@@ -4797,9 +4849,16 @@ public class AnalyzeDDLTest extends FrontendTestBase {
         "Could not resolve table reference: 'default.doesntexist'");
     AnalysisError("comment on view functional.alltypes is 'comment'",
         "COMMENT ON VIEW not allowed on a table: functional.alltypes");
+    AnalyzesOk(String.format("comment on view functional.alltypes_view is '%s'",
+        StringUtils.repeat("a", 500)));
+    AnalyzesOk(String.format("comment on view functional.alltypes_view is '%s'",
+        StringUtils.repeat("a", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH)));
     AnalysisError(String.format("comment on view functional.alltypes_view is '%s'",
-        buildLongComment()), "Comment exceeds maximum length of 256 characters. " +
-        "The given comment has 261 characters.");
+        buildLongComment()), String.format(
+        "Comment exceeds maximum length of %d characters. " +
+        "The given comment has %d characters.",
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH,
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH + 5));
   }
 
   @Test
@@ -4817,9 +4876,16 @@ public class AnalyzeDDLTest extends FrontendTestBase {
     }
     AnalysisError("comment on column functional.alltypes.doesntexist is 'comment'",
         "Column 'doesntexist' does not exist in table: functional.alltypes");
+    AnalyzesOk(String.format("comment on column functional.alltypes.id is '%s'",
+        StringUtils.repeat("a", 500)));
+    AnalyzesOk(String.format("comment on column functional.alltypes.id is '%s'",
+        StringUtils.repeat("a", MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH)));
     AnalysisError(String.format("comment on column functional.alltypes.id is '%s'",
-        buildLongComment()), "Comment exceeds maximum length of 256 characters. " +
-        "The given comment has 261 characters.");
+        buildLongComment()), String.format(
+        "Comment exceeds maximum length of %d characters. " +
+        "The given comment has %d characters.",
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH,
+        MetaStoreUtil.CREATE_MAX_COMMENT_LENGTH + 5));
   }
 
   private static String buildLongComment() {
@@ -4841,6 +4907,13 @@ public class AnalyzeDDLTest extends FrontendTestBase {
           ownerType, buildLongOwnerName()), "Owner name exceeds maximum length of 128 " +
           "characters. The given owner name has 133 characters.");
     }
+  }
+
+  @Test
+  public void TestAlterDatabaseSetDbProperties() {
+    AnalyzesOk("alter database functional set dbproperties('a'='b')");
+    AnalysisError("alter database doesntexist set dbproperties('a'='b')",
+          "Database does not exist: doesntexist");
   }
 
   @Test

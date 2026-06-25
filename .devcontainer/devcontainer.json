@@ -2,11 +2,15 @@
   "name": "Impala Dev",
   "dockerFile": "Dockerfile",
   "runArgs": [
-    "--privileged"
+    "--privileged",
+    "--cpu=8",
+    "--memory=20g"
   ],
   "remoteUser": "impdev",
   "containerUser": "impdev",
+  "forwardPorts": [5070, 6080, 8051, 8088, 10001, 25000, 25001, 25002, 25010, 25020],
   "postCreateCommand": "echo 'yes' | bin/bootstrap_development.sh",
+  "postStartCommand": "sudo service postgresql start",
   "customizations": {
     "vscode": {
       "extensions": [

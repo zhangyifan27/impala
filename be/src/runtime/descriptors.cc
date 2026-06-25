@@ -95,6 +95,11 @@ llvm::Constant* NullIndicatorOffset::ToIR(LlvmCodeGen* codegen) const {
           zeroes->getStructElement(2)});
 }
 
+llvm::Constant* NullIndicatorOffset::ToIRPacked(LlvmCodeGen* codegen) const {
+  uint64_t packed = ((uint64_t)bit_mask << 32) | ((uint64_t)byte_offset);
+  return codegen->GetI64Constant(packed);
+}
+
 ostream& operator<<(ostream& os, const NullIndicatorOffset& null_indicator) {
   os << null_indicator.DebugString();
   return os;
@@ -172,11 +177,15 @@ inline bool SlotDescriptor::IsChildOfStruct() const {
 ColumnDescriptor::ColumnDescriptor(const TColumnDescriptor& tdesc)
   : name_(tdesc.name),
     type_(ColumnType::FromThrift(tdesc.type)) {
+  is_nullable_ = tdesc.__isset.isNullable ? tdesc.isNullable : true;
   if (tdesc.__isset.icebergFieldId) {
     field_id_ = tdesc.icebergFieldId;
     // Get key and value field_id for Iceberg table column with Map type.
     field_map_key_id_ = tdesc.icebergFieldMapKeyId;
     field_map_value_id_ = tdesc.icebergFieldMapValueId;
+    if (tdesc.__isset.icebergInitialDefault) {
+      initial_default_ = tdesc.icebergInitialDefault;
+    }
   }
 }
 
@@ -272,6 +281,7 @@ HdfsTableDescriptor::HdfsTableDescriptor(const TTableDescriptor& tdesc, ObjectPo
   valid_write_id_list_ = tdesc.hdfsTable.valid_write_ids;
   if (tdesc.__isset.icebergTable) {
     is_iceberg_ = true;
+    iceberg_format_version_ = tdesc.icebergTable.format_version;
     iceberg_table_location_ = tdesc.icebergTable.table_location;
     iceberg_spec_id_ = tdesc.icebergTable.default_partition_spec_id;
     iceberg_partition_specs_ = tdesc.icebergTable.partition_spec;

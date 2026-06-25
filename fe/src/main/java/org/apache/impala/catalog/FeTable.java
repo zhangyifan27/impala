@@ -25,6 +25,9 @@ import java.util.stream.Collectors;
 
 import org.apache.hadoop.hive.common.ValidWriteIdList;
 import org.apache.hadoop.hive.metastore.api.Table;
+import org.apache.impala.analysis.Expr;
+import org.apache.impala.analysis.SlotDescriptor;
+import org.apache.impala.analysis.SlotRef;
 import org.apache.impala.analysis.TableName;
 import org.apache.impala.thrift.TCatalogObjectType;
 import org.apache.impala.thrift.TColumnDescriptor;
@@ -154,13 +157,26 @@ public interface FeTable {
     if (!isFullAcid) return columns;
     // Filter out row__id as it doesn't exist in HMS.
     return columns.stream()
-        .filter(c -> !c.getName().equals("row__id"))
+        .filter(c -> !c.isHidden() && !c.getName().equals("row__id"))
         .collect(Collectors.toList());
   }
 
   int getNumClusteringCols();
 
   boolean isClusteringColumn(Column c);
+
+  default boolean referencesPartitionColumn(Expr expr) {
+    // TODO: Find another way to check this for Iceberg tables.
+    int numPartitionCols = getNumClusteringCols();
+    if (numPartitionCols == 0) return false;
+
+    List<SlotRef> slotRefs = new ArrayList<>();
+    expr.collect(SlotRef.class, slotRefs);
+    return slotRefs.stream()
+        .map(SlotRef::getDesc)
+        .map(SlotDescriptor::getColumn)
+        .anyMatch(c -> c != null && c.getPosition() < numPartitionCols);
+  }
 
   /**
    * Return true when the column is used in a computed partition, e.g. in Iceberg

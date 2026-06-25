@@ -20,9 +20,12 @@
 #include <functional>
 #include <numeric>
 #include <sstream>
+#include <gflags/gflags.h>
 #include <gutil/strings/substitute.h>
 
 #include "codegen/llvm-codegen.h"
+#include "common/logging.h"
+#include "gen-cpp/Metrics_types.h"
 #include "exec/blocking-join-node.inline.h"
 #include "exec/exec-node-util.h"
 #include "exec/exec-node.inline.h"
@@ -37,11 +40,17 @@
 #include "runtime/runtime-state.h"
 #include "util/cyclic-barrier.h"
 #include "util/debug-util.h"
+#include "util/pretty-printer.h"
 #include "util/runtime-profile-counters.h"
 
 #include "gen-cpp/PlanNodes_types.h"
 
 #include "common/names.h"
+
+DEFINE_double_hidden(result_pool_mem_multiplier, 0.5, "");
+DEFINE_validator(result_pool_mem_multiplier, [](const char* flagname, double val) {
+  return val > 0.0 && val <= 1.0;
+});
 
 static const string PREPARE_FOR_READ_FAILED_ERROR_MSG =
     "Failed to acquire initial read buffer for stream in hash join node $0. Reducing "
@@ -115,9 +124,13 @@ PartitionedHashJoinNode::PartitionedHashJoinNode(RuntimeState* state,
     probe_exprs_(pnode.probe_exprs_),
     other_join_conjuncts_(pnode.other_join_conjuncts_),
     hash_table_config_(*pnode.hash_table_config_),
+    expr_results_mem_limit_(FLAGS_result_pool_mem_multiplier
+        * state->query_mem_tracker()->GetLowestLimit(MemLimit::SOFT)),
     process_probe_batch_fn_(pnode.process_probe_batch_fn_),
     process_probe_batch_fn_level0_(pnode.process_probe_batch_fn_level0_) {
   memset(hash_tbls_, 0, sizeof(HashTable*) * PARTITION_FANOUT);
+  VLOG(2) << "Conjunct expression results pool memory limit: "
+      << PrettyPrinter::Print(expr_results_mem_limit_, TUnit::BYTES);
 }
 
 PartitionedHashJoinNode::~PartitionedHashJoinNode() {
@@ -299,36 +312,19 @@ void PartitionedHashJoinNode::Close(RuntimeState* state) {
   if (build_batch_ != nullptr) build_batch_->Reset();
   if (probe_batch_ != nullptr) probe_batch_->Reset();
   CloseAndDeletePartitions(nullptr);
-  bool separate_build = UseSeparateBuild(state->query_options());
-  if (prepare_succeeded_ && builder_ == nullptr && separate_build) {
-    DCHECK(builder_ == nullptr);
-    DCHECK(!waited_for_build_);
-    // Find the separate join builder. This can return an error status if the Prepare()
-    // phase failed. In that case, there is no need to notify the builder and it can
-    // be skipped.
-    JoinBuilder* separate_builder;
-    Status status = LookupSeparateJoinBuilder(state, &separate_builder);
-    if (status.ok()) {
-      builder_ = dynamic_cast<PhjBuilder*>(separate_builder);
-      DCHECK(builder_ != nullptr);
-    }
+  if (UseSeparateBuild(state->query_options()) && waited_for_build_
+      && buffer_pool_client()->GetReservation() > resource_profile_.min_reservation) {
+    DCHECK_NE(builder_, nullptr);
+    // Transfer back surplus reservation, which we may have borrowed from 'builder_'.
+    // Do this before unregistering from the builder to avoid race conditions.
+    builder_->ReturnReservation(buffer_pool_client(),
+        buffer_pool_client()->GetReservation() - resource_profile_.min_reservation);
   }
-  if (builder_ != nullptr) {
-    if (separate_build && !waited_for_build_) {
-      // There is a separate build and we never reached the probe phase
-      builder_->CloseBeforeProbe(state);
-    } else {
-      if (separate_build
-          && buffer_pool_client()->GetReservation() > resource_profile_.min_reservation) {
-        // Transfer back surplus reservation, which we may have borrowed from 'builder_'.
-        builder_->ReturnReservation(buffer_pool_client(),
-            buffer_pool_client()->GetReservation() - resource_profile_.min_reservation);
-      }
-      builder_->CloseFromProbe(state);
-      waited_for_build_ = false;
-    }
-
-    if (builder_->num_probe_threads() > 1) builder_->UnregisterThreadFromBarrier();
+  UnregisterFromBuilder(state, &builder_);
+  // There is additional logic to unregister from the builder that is specific to
+  // partitioned hash joins.
+  if (builder_ != nullptr && builder_->num_probe_threads() > 1) {
+    builder_->UnregisterThreadFromBarrier();
   }
   ScalarExprEvaluator::Close(other_join_conjunct_evals_, state);
   if (probe_expr_results_pool_ != nullptr) probe_expr_results_pool_->FreeAll();
@@ -1496,6 +1492,13 @@ Status PartitionedHashJoinPlanNode::CodegenProcessProbeBatch(
   llvm::Function* eval_conjuncts_fn;
   RETURN_IF_ERROR(ExecNode::CodegenEvalConjuncts(codegen, conjuncts_,
       &eval_conjuncts_fn));
+
+  // Remove call to ClearExprResultsPool if no join conjuncts exist.
+  if (conjuncts_.empty() && other_join_conjuncts_.empty()) {
+    int removed =
+        codegen->RemoveCallSites(process_probe_batch_fn, "ClearExprResultsPool");
+    DCHECK_EQ(removed, 1);
+  }
 
   // Replace all call sites with codegen version
   int replaced = codegen->ReplaceCallSites(process_probe_batch_fn, eval_row_fn,

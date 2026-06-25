@@ -18,7 +18,7 @@
 # under the License.
 
 # This script bootstraps a system for Impala development from almost nothing; it is known
-# to work on Ubuntu 16.04. It clobbers some local environment and system
+# to work on Ubuntu 20.04. It clobbers some local environment and system
 # configurations, so it is best to run this in a fresh install. It also sets up the
 # ~/.bashrc for the calling user and impala-config-local.sh with some environment
 # variables to make Impala compile and run after this script is complete.
@@ -37,10 +37,6 @@
 #      adduser --disabled-password --gecos '' impdev
 #      echo 'impdev ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 #   3. Run this script as that user: su - impdev -c /bootstrap_development.sh
-#
-# This script has some specializations for CentOS/Redhat 6/7 and Ubuntu.
-# Of note, inside of Docker, Redhat 7 doesn't allow you to start daemons
-# with systemctl, so sshd and postgresql are started manually in those cases.
 
 set -eu -o pipefail
 
@@ -70,12 +66,10 @@ set -x
 
 # Determine whether we're running on redhat or ubuntu
 REDHAT=
-REDHAT7=
 REDHAT8=
 REDHAT9=
+REDHAT10=
 UBUNTU=
-UBUNTU16=
-UBUNTU18=
 UBUNTU20=
 UBUNTU22=
 UBUNTU24=
@@ -83,19 +77,18 @@ IN_DOCKER=
 if [[ -f /etc/redhat-release ]]; then
   REDHAT=true
   echo "Identified redhat system."
-  if grep 'release 9\.' /etc/redhat-release; then
+  if grep 'release 10\.' /etc/redhat-release; then
+    REDHAT10=true
+    echo "Identified redhat10 system."
+  elif grep 'release 9\.' /etc/redhat-release; then
     REDHAT9=true
     echo "Identified redhat9 system."
-  fi
-  if grep 'release 8\.' /etc/redhat-release; then
+  elif grep 'release 8\.' /etc/redhat-release; then
     REDHAT8=true
     echo "Identified redhat8 system."
+  else
+    echo "This script only supports Redhat releases 8, 9, or 10 (or equivalents)."
   fi
-  if grep 'release 7\.' /etc/redhat-release; then
-    REDHAT7=true
-    echo "Identified redhat7 system."
-  fi
-  # TODO: restrict redhat versions
 else
   source /etc/lsb-release
   if [[ $DISTRIB_ID = Ubuntu ]]
@@ -104,15 +97,7 @@ else
     echo "Identified Ubuntu system."
     # Kerberos setup would pop up dialog boxes without this
     export DEBIAN_FRONTEND=noninteractive
-    if [[ $DISTRIB_RELEASE = 16.04 ]]
-    then
-      UBUNTU16=true
-      echo "Identified Ubuntu 16.04 system."
-    elif [[ $DISTRIB_RELEASE = 18.04 ]]
-    then
-      UBUNTU18=true
-      echo "Identified Ubuntu 18.04 system."
-    elif [[ $DISTRIB_RELEASE = 20.04 ]]
+    if [[ $DISTRIB_RELEASE = 20.04 ]]
     then
       UBUNTU20=true
       echo "Identified Ubuntu 20.04 system."
@@ -125,7 +110,7 @@ else
       UBUNTU24=true
       echo "Identified Ubuntu 24.04 system."
     else
-      echo "This script supports Ubuntu versions 16.04, 18.04, 20.04, 22.04, or 24.04" >&2
+      echo "This script supports Ubuntu versions 20.04, 22.04, or 24.04" >&2
       exit 1
     fi
   else
@@ -141,20 +126,6 @@ fi
 # Helper function to execute following command only on Ubuntu
 function ubuntu {
   if [[ "$UBUNTU" == true ]]; then
-    "$@"
-  fi
-}
-
-# Helper function to execute following command only on Ubuntu 16.04
-function ubuntu16 {
-  if [[ "$UBUNTU16" == true ]]; then
-    "$@"
-  fi
-}
-
-# Helper function to execute following command only on Ubuntu 18.04
-function ubuntu18 {
-  if [[ "$UBUNTU18" == true ]]; then
     "$@"
   fi
 }
@@ -184,21 +155,21 @@ function redhat {
   fi
 }
 
-# Helper function to execute following command only on RedHat7
-function redhat7 {
-  if [[ "$REDHAT7" == true ]]; then
-    "$@"
-  fi
-}
 # Helper function to execute following command only on RedHat8
 function redhat8 {
   if [[ "$REDHAT8" == true ]]; then
     "$@"
   fi
 }
-# Helper function to execute following command only on RedHat8
+# Helper function to execute following command only on RedHat9
 function redhat9 {
   if [[ "$REDHAT9" == true ]]; then
+    "$@"
+  fi
+}
+# Helper function to execute following command only on RedHat10
+function redhat10 {
+  if [[ "$REDHAT10" == true ]]; then
     "$@"
   fi
 }
@@ -214,6 +185,8 @@ function notindocker {
     "$@"
   fi
 }
+
+ARCH_NAME=$(uname -m)
 
 # X permission on home directory is needed for some uses of postgresql (IMPALA-13693)
 chmod o+X ~
@@ -252,39 +225,11 @@ ubuntu apt-get --yes install ccache curl file gawk g++ gcc apt-utils git libffi-
         libxslt-dev openjdk-${UBUNTU_JAVA_VERSION}-jdk \
         openjdk-${UBUNTU_JAVA_VERSION}-source openjdk-${UBUNTU_JAVA_VERSION}-dbg
 
-# Regular python packages don't exist on Ubuntu 22. Everything is Python 3.
-ubuntu16 apt-get --yes install python python-dev python-setuptools
-ubuntu18 apt-get --yes install python python-dev python-setuptools
-ubuntu20 apt-get --yes install python python-dev python-setuptools
-
-# Ubuntu 20's Python 2.7.18-1~20.04.5 version has a bug in its tarfile support.
-# If we detect the affected tarfile.py, download a patched version and overwrite it.
-if [[ $UBUNTU20 == true ]]; then
-  if [[ -f /usr/lib/python2.7/tarfile.py ]]; then
-    TARFILE_PY_HASH=$(sha1sum /usr/lib/python2.7/tarfile.py | cut -d' ' -f1)
-    if [[ "${TARFILE_PY_HASH}" == "6e1a6d9ea2a535cbb17fe266ed9ac76eb5e27b89" ]]; then
-      TMP_DIR=$(mktemp -d)
-      pushd $TMP_DIR
-      wget -nv https://launchpadlibrarian.net/759546541/tarfile.py
-      sudo cp tarfile.py /usr/lib/python2.7/tarfile.py
-      popd
-      rm -rf $TMP_DIR
-    fi
-  fi
-fi
-
 # Required by Kudu in the minicluster. Older Kudu versions depend on libtinfo5,
 # versions that can be compiled for Ubuntu 24.04 depend on libtinfo6.
 ubuntu20 apt-get --yes install libtinfo5 libtinfo6
 ubuntu22 apt-get --yes install libtinfo5 libtinfo6
 ubuntu24 apt-get --yes install libtinfo6
-
-ARCH_NAME=$(uname -p)
-if [[ $ARCH_NAME == 'aarch64' ]]; then
-  ubuntu apt-get --yes install unzip pkg-config flex maven python3-pip build-essential \
-          texinfo bison autoconf automake libtool libz-dev libncurses-dev \
-          libncurses5-dev libreadline-dev
-fi
 
 ubuntu sudo update-java-alternatives -l || true
 
@@ -296,95 +241,70 @@ redhat sudo yum install -y file gawk gcc gcc-c++ git krb5-devel krb5-server \
         krb5-workstation libevent-devel libffi-devel make openssl-devel cyrus-sasl \
         cyrus-sasl-gssapi cyrus-sasl-devel cyrus-sasl-plain \
         postgresql postgresql-server rpm-build \
-        wget vim-common nscd cmake zlib-devel \
-        procps psmisc lsof openssh-server python3-devel python3-setuptools \
+        wget vim-common cmake zlib-devel \
+        procps psmisc lsof openssh-server \
         net-tools langpacks-en glibc-langpack-en libxml2-devel libxslt-devel \
         java-${REDHAT_JAVA_VERSION}-openjdk-src java-${REDHAT_JAVA_VERSION}-openjdk-devel
+# NSCD was removed in redhat10
+redhat8 sudo yum install -y nscd
+redhat9 sudo yum install -y nscd
+# We need Python >= 3.8, so Redhat 8 needs to manually specify a newer python
+redhat8 sudo yum install -y python38-devel python38-setuptools
+redhat9 sudo yum install -y python3-devel python3-setuptools
+redhat10 sudo yum install -y python3-devel python3-setuptools
 
-redhat sudo alternatives --set java java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
-redhat sudo alternatives --set javac java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
-redhat sudo alternatives --set java_sdk_openjdk java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
-redhat sudo alternatives --set jre_openjdk java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
+if [[ "$REDHAT10" == true ]] ; then
+  # Redhat 10 doesn't automatically create the alternatives family that we rely on
+  # below. Instead, this uses the paths directly.
+  sudo alternatives --set java /usr/lib/jvm/java-${REDHAT_JAVA_VERSION}-openjdk/bin/java
+  sudo alternatives --set javac \
+    /usr/lib/jvm/java-${REDHAT_JAVA_VERSION}-openjdk/bin/javac
+  sudo alternatives --set java_sdk_openjdk \
+    /usr/lib/jvm/java-${REDHAT_JAVA_VERSION}-openjdk
+  sudo alternatives --set jre_openjdk /usr/lib/jvm/java-${REDHAT_JAVA_VERSION}-openjdk
+elif [[ "$REDHAT" == true ]] ; then
+  # Redhat 8 and 9 have alternatives family settings (i.e. aliases that we can use
+  # rather than the path).
+  sudo alternatives --set java java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
+  sudo alternatives --set javac java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
+  sudo alternatives --set java_sdk_openjdk \
+    java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
+  sudo alternatives --set jre_openjdk java-${REDHAT_JAVA_VERSION}-openjdk.${ARCH_NAME}
+fi
+
+redhat8 sudo alternatives --set python3 /usr/bin/python3.8
 
 # update-java-alternatives may not take effect if there is a Java in PATH
 which java
 java -version
 which javac
 javac -version
+python3 --version
 
 # fuse-devel doesn't exist for Redhat 9
-redhat7 sudo yum install -y fuse-devel curl
 redhat8 sudo yum install -y fuse-devel curl
-# Redhat9 can have curl-minimal preinstalled, which can conflict with curl.
+# Redhat 9 and 10 can have curl-minimal preinstalled, which can conflict with curl.
 # Adding --allowerasing allows curl to replace curl-minimal.
 redhat9 sudo yum install -y --allowerasing curl
-
-# RedHat / CentOS 8 exposes only specific versions of Python.
-# Set up unversioned default Python 2.x for older CentOS versions
-redhat7 sudo yum install -y python-devel python-setuptools python-argparse
-
-# Install Python 2.x explicitly for CentOS 8
-function setup_python2() {
-  if command -v python && [[ $(python --version 2>&1 | cut -d ' ' -f 2) =~ 2\. ]]; then
-    echo "We have Python 2.x";
-  else
-    if ! command -v python2; then
-      # Python2 needs to be installed
-      sudo dnf install -y python2
-    fi
-    # Here Python2 is installed, but is not the default Python.
-    # 1. Link pip's version to Python's version
-    sudo alternatives --add-slave python /usr/bin/python2 /usr/bin/pip pip /usr/bin/pip2
-    sudo alternatives --add-slave python /usr/libexec/no-python  /usr/bin/pip pip \
-        /usr/libexec/no-python
-    # 2. Set Python2 (with pip2) to be the system default.
-    sudo alternatives --set python /usr/bin/python2
-  fi
-  # Here the Python2 runtime is already installed, add the dev package
-  sudo dnf -y install python2-devel
-}
-
-# IMPALA-14606: Stop building using Python 2 and always run with
-# IMPALA_USE_PYTHON3_TESTS=true.
-# redhat8 setup_python2
-# redhat8 pip install --user argparse
-
-# Point Python to Python 3 for Redhat 9 and Ubuntu 22, or newer
-function setup_python3() {
-  # If python is already set, then use it. Otherwise, try to point python to python3.
-  if ! command -v python > /dev/null; then
-    if command -v python3 ; then
-      # Newer OSes (e.g. Redhat 9 and equivalents) make it harder to get Python 2, and we
-      # need to start using Python 3 by default.
-      # For these new OSes (Ubuntu 22+, Redhat 9), there is no alternative entry for
-      # python, so we need to create one from scratch.
-      if command -v alternatives > /dev/null; then
-        if sudo alternatives --list | grep python > /dev/null ; then
-          sudo alternatives --set python /usr/bin/python3
-        else
-          # The alternative doesn't exist, create it
-          sudo alternatives --install /usr/bin/python python /usr/bin/python3 20
-        fi
-      elif command -v update-alternatives > /dev/null; then
-        # This is what Ubuntu 20/22+ does. There is no official python alternative,
-        # so we need to create one.
-        sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 20
-      else
-        echo "ERROR: trying to set python to point to python3"
-        echo "ERROR: alternatives/update-alternatives don't exist, so giving up..."
-        exit 1
-      fi
-    fi
-  fi
-}
-
-redhat8 setup_python3
-redhat9 setup_python3
-ubuntu22 setup_python3
-ubuntu24 setup_python3
+redhat10 sudo yum install -y --allowerasing curl
 
 # CentOS repos don't contain ccache, so install from EPEL
-redhat sudo yum install -y epel-release
+redhat8 sudo yum install -y epel-release
+redhat9 sudo yum install -y epel-release
+# Redhat 10 needs CRB to be enabled to install epel-release
+if [[ "$REDHAT10" == true ]] ; then
+  # RHEL has different steps from Rocky/Alma
+  if grep "Red Hat Enterprise Linux" /etc/redhat-release ; then
+    # On RHEL, CRB is done through the subscription manager, but some RHEL systems don't
+    # have repositories enabled. For now, just use the direct link.
+    sudo yum install -y \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+  else
+    sudo dnf -y install dnf-plugins-core
+    sudo dnf config-manager --enable crb
+    sudo dnf -y install epel-release
+  fi
+fi
 redhat sudo yum install -y ccache
 
 # Clean up yum caches
@@ -392,23 +312,21 @@ redhat sudo yum clean all
 
 # Download Maven since the packaged version is pretty old.
 : ${IMPALA_TOOLCHAIN_HOST:=native-toolchain.s3.amazonaws.com}
-MVN_VERSION="3.9.8"
+MVN_VERSION="3.9.15"
 if [ ! -d "/usr/local/apache-maven-${MVN_VERSION}" ]; then
   sudo wget -nv \
     "https://${IMPALA_TOOLCHAIN_HOST}/maven/apache-maven-${MVN_VERSION}-bin.tar.gz"
-  sha512sum -c - <<< "7d171def9b85846bf757a2cec94b7529371068a0670df14682447224e57983528e97a6d1b850327e4ca02b139abaab7fcb93c4315119e6f0ffb3f0cbc0d0b9a2 apache-maven-${MVN_VERSION}-bin.tar.gz"
+  sha512sum -c - <<< "33d81e0ec785f0207e3e5e3ffb61863e1dca5784c15ac3fb5ff105f69cffbea484eb8d473ea60467a63f7b0570eef8622f2fed8eee96acbe668aa313391cddb3 apache-maven-${MVN_VERSION}-bin.tar.gz"
   sudo tar -C /usr/local -xzf "apache-maven-${MVN_VERSION}-bin.tar.gz"
   # Ensure that Impala's preferred version is installed locally,
   # even if a previous version exists there.
   sudo ln -s -f "/usr/local/apache-maven-${MVN_VERSION}/bin/mvn" "/usr/local/bin"
 
-  # reset permissions on redhat8
-  # TODO: figure out why this is necessary for redhat8
+  # reset permissions on redhat
+  # TODO: figure out why this is necessary for redhat
   MAVEN_DIRECTORY="/usr/local/apache-maven-${MVN_VERSION}"
-  redhat8 indocker sudo chmod 0755 ${MAVEN_DIRECTORY}
-  redhat8 indocker sudo chmod 0755 ${MAVEN_DIRECTORY}/{bin,boot}
-  redhat9 indocker sudo chmod 0755 ${MAVEN_DIRECTORY}
-  redhat9 indocker sudo chmod 0755 ${MAVEN_DIRECTORY}/{bin,boot}
+  redhat indocker sudo chmod 0755 ${MAVEN_DIRECTORY}
+  redhat indocker sudo chmod 0755 ${MAVEN_DIRECTORY}/{bin,boot}
 fi
 
 if ! { service --status-all | grep -E '^ \[ \+ \]  ssh$'; }
@@ -470,14 +388,10 @@ function setup_postgresql() {
     sudo -u postgres psql -c "CREATE ROLE hiveuser LOGIN PASSWORD 'password';"
   fi
   sudo -u postgres psql -c "ALTER ROLE hiveuser WITH CREATEDB;"
-  # On Ubuntu 18.04 aarch64 version, the sql 'select * from pg_roles' blocked,
-  # because output of 'select *' is too long to display in 1 line.
-  # So here just change it to 'select count(*)' as a work around.
-  if [[ $ARCH_NAME == 'aarch64' ]]; then
-    sudo -u postgres psql -c "SELECT count(*) FROM pg_roles WHERE rolname = 'hiveuser';"
-  else
-    sudo -u postgres psql -c "SELECT * FROM pg_roles WHERE rolname = 'hiveuser';"
-  fi
+  # The output of "select * from pg_roles" may cause psql to block waiting for
+  # something to dismiss the terminal output. To avoid that, send output through
+  # tee.
+  sudo -u postgres psql -c "SELECT * FROM pg_roles WHERE rolname = 'hiveuser';" | tee
   echo ">>> Configuring postgresql finished."
 }
 
@@ -548,10 +462,7 @@ echo -e "${USER} - memlock 65536" | sudo tee /etc/security/limits.d/10-memlock.c
 
 # Default on CentOS limits a user to 1024 or 4096 processes (threads) , which isn't
 # enough for minicluster with all of its friends.
-redhat7 sudo sed -i 's,\*\s*soft\s*nproc\s*[0-9]*$,* soft nproc unlimited,' \
-  /etc/security/limits.d/*-nproc.conf
-redhat8 echo -e "* soft nproc unlimited" | sudo tee -a /etc/security/limits.conf
-redhat9 echo -e "* soft nproc unlimited" | sudo tee -a /etc/security/limits.conf
+redhat echo -e "* soft nproc unlimited" | sudo tee -a /etc/security/limits.conf
 
 echo ">>> Checking out Impala"
 

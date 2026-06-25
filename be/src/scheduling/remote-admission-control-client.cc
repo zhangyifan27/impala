@@ -17,6 +17,7 @@
 
 #include "scheduling/remote-admission-control-client.h"
 
+#include "common/status-serialization.h"
 #include "common/names.h"
 #include "gen-cpp/admission_control_service.pb.h"
 #include "gen-cpp/admission_control_service.proxy.h"
@@ -91,7 +92,7 @@ Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy*
       return Status::OK();
     }
 
-    admit_status = Status(resp.status());
+    admit_status = StatusFromProto(resp.status());
     if (admit_status.ok()) {
       pending_admit_ = true;
     }
@@ -103,7 +104,8 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     const AdmissionController::AdmissionRequest& request,
     RuntimeProfile::EventSequence* query_events,
     std::unique_ptr<QuerySchedulePB>* schedule_result,
-    int64_t* wait_start_time_ms, int64_t* wait_end_time_ms, SpanManager* span_mgr) {
+    int64_t* wait_start_time_ms, int64_t* wait_end_time_ms,
+    OtelTraceManager* otel_trace_mgr) {
   ScopedEvent completedEvent(
       query_events, AdmissionControlClient::QUERY_EVENT_COMPLETED_ADMISSION);
 
@@ -182,15 +184,15 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
       schedule_result->get()->Swap(get_status_resp.mutable_query_schedule());
       break;
     }
-    admit_status = Status(get_status_resp.status());
+    admit_status = StatusFromProto(get_status_resp.status());
     if (!admit_status.ok()) {
       break;
     }
 
     if (!was_queued_) {
       query_events->MarkEvent(QUERY_EVENT_QUEUED);
-      if (span_mgr != nullptr) {
-        span_mgr->AddChildSpanEvent(QUERY_EVENT_QUEUED);
+      if (otel_trace_mgr != nullptr) {
+        otel_trace_mgr->AddChildSpanEvent(QUERY_EVENT_QUEUED);
       }
       was_queued_ = true;
     }
@@ -230,7 +232,7 @@ void RemoteAdmissionControlClient::ReleaseQuery(int64_t peak_mem_consumption) {
   if (!rpc_status.ok()) {
     LOG(WARNING) << "ReleaseQuery rpc failed for " << query_id_ << ": " << rpc_status;
   }
-  Status resp_status(resp.status());
+  Status resp_status = StatusFromProto(resp.status());
   if (!resp_status.ok()) {
     LOG(WARNING) << "ReleaseQuery failed for " << query_id_ << ": " << resp_status;
   }
@@ -264,7 +266,7 @@ void RemoteAdmissionControlClient::ReleaseQueryBackends(
     LOG(WARNING) << "ReleaseQueryBackends rpc failed for " << query_id_ << ": "
                  << rpc_status;
   }
-  Status resp_status(resp.status());
+  Status resp_status = StatusFromProto(resp.status());
   if (!resp_status.ok()) {
     LOG(WARNING) << "ReleaseQueryBackends failed for " << query_id_ << ": "
                  << resp_status;
@@ -300,7 +302,7 @@ void RemoteAdmissionControlClient::CancelAdmission() {
   if (!rpc_status.ok()) {
     LOG(WARNING) << "CancelAdmission rpc failed for " << query_id_ << ": " << rpc_status;
   }
-  Status resp_status(resp.status());
+  Status resp_status = StatusFromProto(resp.status());
   if (!resp_status.ok()) {
     LOG(WARNING) << "CancelAdmission failed for " << query_id_ << ": " << resp_status;
   }

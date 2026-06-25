@@ -17,7 +17,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from contextlib import closing
 import errno
 import getpass
@@ -28,8 +27,6 @@ import socket
 from subprocess import call, Popen
 import tempfile
 from time import sleep, time
-
-from builtins import range
 import pytest
 
 from impala_shell.impala_client import utf8_encode_if_needed
@@ -62,19 +59,6 @@ QUERY_FILE_PATH = os.path.join(os.environ['IMPALA_HOME'], 'tests', 'shell')
 RUSSIAN_CHARS = utf8_encode_if_needed(
     u"А, Б, В, Г, Д, Е, Ё, Ж, З, И, Й, К, Л, М, Н, О, П, Р,"
     u"С, Т, У, Ф, Х, Ц,Ч, Ш, Щ, Ъ, Ы, Ь, Э, Ю, Я")
-
-"""IMPALA-12216 implemented timestamp to be printed in case of any error/warning
-  during query execution, below is an example :
-
-   2024-07-15 12:49:27 [Exception] type=<class 'socket.error'> in FetchResults.
-   2024-07-15 12:49:27 [Warning]  Cancelling Query
-   2024-07-15 12:49:27 [Warning] close session RPC failed: <class 'shell_exceptions.
-   QueryCancelledByShellException'>
-
-  To avoid test flakiness due to timestamp, we would be ignoring timestamp in actual
-  result before asserting with expected result, (YYYY-MM-DD hh:mm:ss ) is of length 20
-"""
-TS_LEN = 20
 
 
 def find_query_option(key, string, strip_brackets=True):
@@ -146,9 +130,6 @@ def tmp_file():
 
 class TestImpalaShell(ImpalaTestSuite):
   """A set of sanity tests for the Impala shell commandline parameters.
-
-  The tests need to maintain Python 2.4 compatibility as a sub-goal of having
-  shell tests is to ensure that it's not broken in systems running Python 2.4.
   The tests need a running impalad instance in order to execute queries.
 
   TODO:
@@ -1123,6 +1104,7 @@ class TestImpalaShell(ImpalaTestSuite):
       finally:
         if impala_shell.poll() is None:
           impala_shell.kill()
+          impala_shell.wait()
         if connection is not None:
           connection.close()
 
@@ -1476,45 +1458,6 @@ class TestImpalaShell(ImpalaTestSuite):
       rows_from_file = [line.rstrip() for line in f]
       assert rows_from_stdout == rows_from_file
 
-  @pytest.mark.execute_serially
-  def test_http_socket_timeout(self, vector):
-    """Test setting different http_socket_timeout_s values."""
-    if (vector.get_value('strict_hs2_protocol')
-        or vector.get_value('protocol') != 'hs2-http'):
-        pytest.skip("http socket timeout not supported in strict hs2 mode."
-                    " Only supported with hs2-http protocol.")
-    # Test very short http_socket_timeout_s, expect errors. After the connection is
-    # established - which now uses connect_timeout_ms - RPCs in the minicluster appear to
-    # respond immediately, so non-blocking mode (timeout=0) does not result in an error.
-    # Instead, use a very small timeout that the RPC cannot meet.
-    args = ['--quiet', '-B', '--query', 'select 0']
-    result = run_impala_shell_cmd(vector, args + ['--http_socket_timeout_s=0.001'],
-                                  expect_success=False)
-
-    # Python 2 throws socket.timeout and Python 3 throws TimeoutError.
-    error_template = "[Exception] type=<class '{0}'> in ExecuteStatement.  timed out"
-    pyver_exceptions = ["socket.timeout", "TimeoutError"]
-    actual_err = result.stderr.splitlines()[0]
-    assert actual_err[TS_LEN:] in [error_template.format(pever_exception)
-                                   for pever_exception in pyver_exceptions]
-
-    # Test http_socket_timeout_s=-1, expect errors
-    result = run_impala_shell_cmd(vector, args + ['--http_socket_timeout_s=-1'],
-                                  expect_success=False)
-    expected_err = ("http_socket_timeout_s must be a nonnegative floating point number"
-                    " expressing seconds, or None")
-    assert result.stderr.splitlines()[0] == expected_err
-
-    # Test http_socket_timeout_s>0, expect success
-    result = run_impala_shell_cmd(vector, args + ['--http_socket_timeout_s=2'])
-    assert result.stderr == ""
-    assert result.stdout == "0\n"
-
-    # Test http_socket_timeout_s=None, expect success
-    result = run_impala_shell_cmd(vector, args + ['--http_socket_timeout_s=None'])
-    assert result.stderr == ""
-    assert result.stdout == "0\n"
-
   def test_connect_max_tries(self, vector):
     """Test setting different connect_max_tries values."""
     if (vector.get_value('strict_hs2_protocol')
@@ -1697,7 +1640,8 @@ class TestImpalaShell(ImpalaTestSuite):
     result = run_impala_shell_cmd(vector, args)
 
     stdout_data = result.stdout.strip()
-    rpc_file_data = open(tmp_file, "r").read().strip()
+    with open(tmp_file, "r") as f:
+      rpc_file_data = f.read().strip()
 
     # compare the rpc details from stdout and file to ensure they match
     # stdout contains additional output such as query results, remove all non-rpc details

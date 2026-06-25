@@ -17,7 +17,6 @@
 
 # Tests end-to-end codegen behaviour.
 
-from __future__ import absolute_import, division, print_function
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.skip import SkipIf
 from tests.common.test_dimensions import create_exec_option_dimension_from_dict
@@ -40,7 +39,7 @@ class TestCodegen(ImpalaTestSuite):
     """Test that codegen is enabled/disabled by the planner as expected."""
     self.run_test_case('QueryTest/disable-codegen', vector)
 
-  def test_select_node_codegen(self, vector):
+  def test_select_node_codegen(self):
     """Test that select node is codegened"""
     result = self.execute_query('select * from (select * from functional.alltypes '
         'limit 1000000) t1 where int_col > 10 limit 10',
@@ -54,7 +53,7 @@ class TestCodegen(ImpalaTestSuite):
     """Test the KrpcDataStreamSender's codegen logic"""
     self.run_test_case('QueryTest/datastream-sender-codegen', vector)
 
-  def test_codegen_failure_for_char_type(self, vector):
+  def test_codegen_failure_for_char_type(self):
     """IMPALA-7288: Regression tests for the codegen failure path when working with a
     CHAR column type. Until IMPALA-3207 is completely fixed there are various paths where
     we need to bail out of codegen."""

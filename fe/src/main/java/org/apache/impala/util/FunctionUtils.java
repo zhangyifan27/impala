@@ -17,38 +17,28 @@
 
 package org.apache.impala.util;
 
-import java.io.IOException;
-import java.lang.reflect.Method;
-import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
-import org.apache.hadoop.fs.Path;
 import org.apache.impala.catalog.Db;
 import org.apache.impala.catalog.Function;
 import org.apache.impala.catalog.Function.CompareMode;
-import org.apache.impala.catalog.ScalarFunction;
 import org.apache.impala.catalog.Type;
-import org.apache.impala.common.FileSystemUtil;
 import org.apache.impala.common.ImpalaException;
-import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.JniUtil;
-import org.apache.impala.hive.executor.HiveUdfExecutorLegacy;
 import org.apache.impala.thrift.TFunction;
 import org.apache.impala.thrift.TFunctionCategory;
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.thrift.protocol.TCompactProtocol;
 
-import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 public abstract class FunctionUtils {
-  public static final Logger LOG = Logger.getLogger(FunctionUtils.class);
+  public static final Logger LOG = LoggerFactory.getLogger(FunctionUtils.class);
 
   public static final FunctionResolutionOrder FUNCTION_RESOLUTION_ORDER =
       new FunctionResolutionOrder();
@@ -156,10 +146,18 @@ public abstract class FunctionUtils {
     }
 
     private int typeCompare(Type t1, Type t2) {
-      Preconditions.checkState(!t1.isComplexType());
-      Preconditions.checkState(!t2.isComplexType());
-      return Integer.compare(t1.getPrimitiveType().ordinal(),
-          t2.getPrimitiveType().ordinal());
+      if (t1.isComplexType() && t2.isComplexType()) {
+        // For complex types, compare their SQL representations
+        // (comparing individual fields would be more complex and is rarely needed)
+        return t1.toSql().compareTo(t2.toSql());
+      }
+      if (t1.isScalarType() && t2.isScalarType()) {
+        // For primitive types, use the original comparison
+        return Integer.compare(t1.getPrimitiveType().ordinal(),
+            t2.getPrimitiveType().ordinal());
+      }
+      // Complex types come after primitive types
+        return t1.isComplexType() ? 1 : -1;
     }
   }
 }

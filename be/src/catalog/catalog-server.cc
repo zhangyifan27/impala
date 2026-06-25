@@ -22,6 +22,7 @@
 #include <thrift/protocol/TJSONProtocol.h>
 
 #include "catalog/catalog-util.h"
+#include "common/status-serialization.h"
 #include "exec/read-write-util.h"
 #include "gen-cpp/CatalogInternalService_types.h"
 #include "gen-cpp/CatalogObjects_types.h"
@@ -92,7 +93,7 @@ DEFINE_int32(catalog_partial_fetch_max_files, 1000000, "Maximum number of file "
 
 DEFINE_int32(catalog_max_lock_skipped_topic_updates, 3, "Maximum number of topic "
     "updates skipped for a table due to lock contention in catalogd after which it must"
-    "be added to the topic the update log. This limit only applies to distinct lock "
+    "be added to the topic update log. This limit only applies to distinct lock "
     "operations which block the topic update thread.");
 
 DEFINE_int64(topic_update_tbl_max_wait_time_ms, 120000, "Maximum time "
@@ -116,6 +117,13 @@ DEFINE_int32(max_wait_time_for_sync_ddl_s, 0, "Maximum time (in seconds) until "
 DEFINE_int32_hidden(hms_event_sync_sleep_interval_ms, 100, "Sleep interval (in ms) "
      "used in the thread of catalogd processing the WaitForHmsEvent RPC. The thread "
      "sleeps for such an interval when checking for HMS events to be synced.");
+
+DEFINE_int32(hms_event_catchup_threshold_s, 1800,
+    "Maximum lag time (in seconds) allowed for HMS events before the event processor "
+    "switches to 'catch-up' mode. In this mode, some table-level events trigger a "
+    "lightweight table invalidation to avoid heavier operations, like table reload, "
+    "to speed up the event processing. "
+    "A value of 0 or less disables this feature.");
 
 DECLARE_string(debug_actions);
 DEFINE_bool(start_hms_server, false, "When set to true catalog server starts a HMS "
@@ -263,7 +271,7 @@ DEFINE_string(common_hms_event_types, "ADD_PARTITION,ALTER_PARTITION,DROP_PARTIT
 
 DEFINE_bool(enable_hierarchical_event_processing, true,
     "This configuration is used to enable hierarchical event processing. The default "
-    "value is false. When enabled, events are fetched, dispatched and processed in "
+    "value is true. When enabled, events are fetched, dispatched and processed in "
     "different threads.");
 
 DEFINE_int32(num_db_event_executors, 5,
@@ -377,6 +385,8 @@ const string CATALOG_OBJECT_WEB_PAGE = "/catalog_object";
 const string CATALOG_OBJECT_TEMPLATE = "catalog_object.tmpl";
 const string CATALOG_OPERATIONS_WEB_PAGE = "/operations";
 const string CATALOG_OPERATIONS_TEMPLATE = "catalog_operations.tmpl";
+const string OPERATION_DETAIL_WEB_PAGE = "/operation_detail";
+const string OPERATION_DETAIL_TEMPLATE = "operation_detail.tmpl";
 const string TABLE_METRICS_WEB_PAGE = "/table_metrics";
 const string TABLE_METRICS_TEMPLATE = "table_metrics.tmpl";
 const string EVENT_WEB_PAGE = "/events";
@@ -405,7 +415,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.result.__set_status(thrift_status);
     VLOG_RPC << "ExecDdl(): response=" << ThriftDebugString(resp);
   }
@@ -421,7 +431,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.result.__set_status(thrift_status);
     VLOG_RPC << "ResetMetadata(): response=" << ThriftDebugString(resp);
   }
@@ -437,7 +447,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.result.__set_status(thrift_status);
     VLOG_RPC << "UpdateCatalog(): response=" << ThriftDebugString(resp);
   }
@@ -453,7 +463,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "GetFunctions(): response=" << ThriftDebugString(resp);
   }
@@ -469,7 +479,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "GetCatalogObject(): response=" << ThriftDebugStringNoThrow(resp);
   }
@@ -492,7 +502,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     // Don't overwrite the non-OK status returned from catalogd
     if (!resp.__isset.status || resp.status.status_code == TErrorCode::OK) {
       TStatus thrift_status;
-      status.ToThrift(&thrift_status);
+      StatusToThrift(status, &thrift_status);
       resp.__set_status(thrift_status);
     }
     VLOG_RPC << "GetPartialCatalogObject(): response=" << ThriftDebugStringNoThrow(resp);
@@ -507,7 +517,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "GetPartitionStats(): response=" << ThriftDebugStringNoThrow(resp);
   }
@@ -524,7 +534,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "PrioritizeLoad(): response=" << ThriftDebugString(resp);
   }
@@ -538,7 +548,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(WARNING) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "UpdateTableUsage(): response.status=" << resp.status;
   }
@@ -552,7 +562,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "GetNullPartitionName(): response=" << ThriftDebugStringNoThrow(resp);
   }
@@ -566,7 +576,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
     }
     if (!status.ok()) LOG(ERROR) << status.GetDetail();
     TStatus thrift_status;
-    status.ToThrift(&thrift_status);
+    StatusToThrift(status, &thrift_status);
     resp.__set_status(thrift_status);
     VLOG_RPC << "GetLatestCompactions(): response=" << ThriftDebugStringNoThrow(resp);
   }
@@ -594,7 +604,7 @@ class CatalogServiceThriftIf : public CatalogServiceIf {
       // Status in response is not set if the error is due to an exception.
       if (resp.status.status_code == TErrorCode::OK) {
         TStatus thrift_status;
-        status.ToThrift(&thrift_status);
+        StatusToThrift(status, &thrift_status);
         resp.__set_status(thrift_status);
       }
     }
@@ -747,6 +757,9 @@ void CatalogServer::RegisterWebpages(Webserver* webserver, bool metrics_only) {
   webserver->RegisterUrlCallback(CATALOG_OPERATIONS_WEB_PAGE, CATALOG_OPERATIONS_TEMPLATE,
       [this](const auto& args, auto* doc) { this->OperationUsageUrlCallback(args, doc); },
       true);
+  webserver->RegisterUrlCallback(OPERATION_DETAIL_WEB_PAGE, OPERATION_DETAIL_TEMPLATE,
+      [this](const auto& args, auto* doc) {
+      this->OperationDetailUrlCallback(args, doc); }, false);
   webserver->RegisterUrlCallback(HADOOP_VARZ_WEB_PAGE, HADOOP_VARZ_TEMPLATE,
       [this](const auto& args, auto* doc) { this->HadoopVarzHandler(args, doc); }, true);
   RegisterLogLevelCallbacks(webserver, true);
@@ -1531,6 +1544,12 @@ static void CatalogOpListToJson(const vector<TCatalogOpRecord>& catalog_ops,
         TimePrecision::Millisecond), document->GetAllocator());
     obj.AddMember("start_time", start_time, document->GetAllocator());
 
+    // Add start_time_ms as a numeric field for use in URLs (to disambiguate operations
+    // with the same query_id and thread_id)
+    Value start_time_ms;
+    start_time_ms.SetInt64(catalog_op.start_time_ms);
+    obj.AddMember("start_time_ms", start_time_ms, document->GetAllocator());
+
     int64_t end_time_ms;
     if (catalog_op.finish_time_ms > 0) {
       end_time_ms = catalog_op.finish_time_ms;
@@ -1552,6 +1571,28 @@ static void CatalogOpListToJson(const vector<TCatalogOpRecord>& catalog_ops,
     Value details(catalog_op.details, document->GetAllocator());
     obj.AddMember("details", details, document->GetAllocator());
 
+    // Add optional fields if they are set
+    if (catalog_op.__isset.request_size_bytes) {
+      Value request_size_bytes;
+      request_size_bytes.SetInt64(catalog_op.request_size_bytes);
+      obj.AddMember("request_size_bytes", request_size_bytes, document->GetAllocator());
+    }
+
+    if (catalog_op.__isset.response_size_bytes) {
+      Value response_size_bytes;
+      response_size_bytes.SetInt64(catalog_op.response_size_bytes);
+      obj.AddMember("response_size_bytes", response_size_bytes, document->GetAllocator());
+    }
+
+    if (catalog_op.__isset.timeline) {
+      // Convert TEventSequence to human-readable string
+      stringstream timeline_ss;
+      RuntimeProfileBase::PrettyPrintTimelineFromThrift(
+          &timeline_ss, "", catalog_op.timeline);
+      Value timeline(timeline_ss.str(), document->GetAllocator());
+      obj.AddMember("timeline", timeline, document->GetAllocator());
+    }
+
     catalog_op_list->PushBack(obj, document->GetAllocator());
   }
 }
@@ -1570,6 +1611,156 @@ void CatalogServer::GetCatalogOpRecords(const TGetOperationUsageResponse& respon
       document);
   document->AddMember("finished_catalog_operations", finished_catalog_ops,
       document->GetAllocator());
+}
+
+void CatalogServer::OperationDetailUrlCallback(const Webserver::WebRequest& req,
+    Document* document) {
+  const auto& args = req.parsed_args;
+  Webserver::ArgumentMap::const_iterator query_id_arg = args.find("query_id");
+  if (query_id_arg == args.end()) {
+    Value error("Missing query_id parameter", document->GetAllocator());
+    document->AddMember("error", error, document->GetAllocator());
+    return;
+  }
+
+  const string& query_id_str = query_id_arg->second;
+
+  // Get thread_id parameter (required since one statement can have multiple
+  // catalog requests with the same query_id)
+  Webserver::ArgumentMap::const_iterator thread_id_arg = args.find("thread_id");
+  if (thread_id_arg == args.end()) {
+    Value error("Missing thread_id parameter", document->GetAllocator());
+    document->AddMember("error", error, document->GetAllocator());
+    return;
+  }
+  int64_t thread_id = atoll(thread_id_arg->second.c_str());
+
+  // Get all operations to determine if we're looking for in-flight or finished
+  TGetOperationUsageResponse operation_usage;
+  Status status = catalog_->GetOperationUsage(&operation_usage);
+  if (!status.ok()) {
+    Value error(status.GetDetail(), document->GetAllocator());
+    document->AddMember("error", error, document->GetAllocator());
+    return;
+  }
+
+  // First check in-flight operations (no start_time_ms needed - same query/thread can't
+  // process two operations simultaneously)
+  const TCatalogOpRecord* found_record = nullptr;
+  for (const auto& record : operation_usage.in_flight_catalog_operations) {
+    if (PrintId(record.query_id) == query_id_str && record.thread_id == thread_id) {
+      found_record = &record;
+      break;
+    }
+  }
+
+  // If not found in in-flight, search finished operations
+  // For finished operations, start_time_ms is REQUIRED to disambiguate
+  if (found_record == nullptr) {
+    Webserver::ArgumentMap::const_iterator start_time_arg = args.find("start_time_ms");
+    if (start_time_arg == args.end()) {
+      Value error("Missing start_time_ms parameter for finished operation lookup. "
+          "This parameter is required to uniquely identify finished operations.",
+          document->GetAllocator());
+      document->AddMember("error", error, document->GetAllocator());
+      return;
+    }
+    int64_t start_time_ms = atoll(start_time_arg->second.c_str());
+
+    for (const auto& record : operation_usage.finished_catalog_operations) {
+      if (PrintId(record.query_id) == query_id_str && record.thread_id == thread_id &&
+          record.start_time_ms == start_time_ms) {
+        found_record = &record;
+        break;
+      }
+    }
+  }
+
+  if (found_record == nullptr) {
+    string error_msg = "Operation not found for query_id: " + query_id_str +
+                       ", thread_id: " + std::to_string(thread_id);
+    Value error(error_msg, document->GetAllocator());
+    document->AddMember("error", error, document->GetAllocator());
+    return;
+  }
+
+  // Add basic operation info
+  Value query_id(query_id_str, document->GetAllocator());
+  document->AddMember("query_id", query_id, document->GetAllocator());
+
+  Value op_name(found_record->catalog_op_name, document->GetAllocator());
+  document->AddMember("catalog_op_name", op_name, document->GetAllocator());
+
+  Value target_name(found_record->target_name, document->GetAllocator());
+  document->AddMember("target_name", target_name, document->GetAllocator());
+
+  Value user(found_record->user, document->GetAllocator());
+  document->AddMember("user", user, document->GetAllocator());
+
+  Value client_ip(found_record->client_ip, document->GetAllocator());
+  document->AddMember("client_ip", client_ip, document->GetAllocator());
+
+  Value coordinator(found_record->coordinator_hostname, document->GetAllocator());
+  document->AddMember("coordinator", coordinator, document->GetAllocator());
+
+  Value start_time(ToStringFromUnixMillis(found_record->start_time_ms,
+      TimePrecision::Millisecond), document->GetAllocator());
+  document->AddMember("start_time", start_time, document->GetAllocator());
+
+  if (found_record->finish_time_ms > 0) {
+    Value finish_time(ToStringFromUnixMillis(found_record->finish_time_ms,
+        TimePrecision::Millisecond), document->GetAllocator());
+    document->AddMember("finish_time", finish_time, document->GetAllocator());
+
+    int64_t duration_ms = found_record->finish_time_ms - found_record->start_time_ms;
+    const string& printed_duration = PrettyPrinter::Print(duration_ms, TUnit::TIME_MS);
+    Value duration(printed_duration, document->GetAllocator());
+    document->AddMember("duration", duration, document->GetAllocator());
+  } else {
+    int64_t duration_ms = UnixMillis() - found_record->start_time_ms;
+    const string& printed_duration = PrettyPrinter::Print(duration_ms, TUnit::TIME_MS);
+    Value duration(printed_duration, document->GetAllocator());
+    document->AddMember("duration", duration, document->GetAllocator());
+  }
+
+  Value status_val(found_record->status, document->GetAllocator());
+  document->AddMember("status", status_val, document->GetAllocator());
+
+  Value details(found_record->details, document->GetAllocator());
+  document->AddMember("details", details, document->GetAllocator());
+
+  // Add timeline if available
+  if (found_record->__isset.timeline) {
+    stringstream timeline_ss;
+    RuntimeProfileBase::PrettyPrintTimelineFromThrift(&timeline_ss, "",
+        found_record->timeline);
+    string formatted_timeline = timeline_ss.str();
+    Value timeline(formatted_timeline, document->GetAllocator());
+    document->AddMember("timeline", timeline, document->GetAllocator());
+  }
+
+  // Add request and response sizes if available
+  if (found_record->__isset.request_size_bytes) {
+    Value request_size;
+    request_size.SetInt64(found_record->request_size_bytes);
+    document->AddMember("request_size_bytes", request_size, document->GetAllocator());
+
+    const string& printed_req_size = PrettyPrinter::Print(
+        found_record->request_size_bytes, TUnit::BYTES);
+    Value request_size_str(printed_req_size, document->GetAllocator());
+    document->AddMember("request_size", request_size_str, document->GetAllocator());
+  }
+
+  if (found_record->__isset.response_size_bytes) {
+    Value response_size;
+    response_size.SetInt64(found_record->response_size_bytes);
+    document->AddMember("response_size_bytes", response_size, document->GetAllocator());
+
+    const string& printed_resp_size = PrettyPrinter::Print(
+        found_record->response_size_bytes, TUnit::BYTES);
+    Value response_size_str(printed_resp_size, document->GetAllocator());
+    document->AddMember("response_size", response_size_str, document->GetAllocator());
+  }
 }
 
 void CatalogServer::TableMetricsUrlCallback(const Webserver::WebRequest& req,

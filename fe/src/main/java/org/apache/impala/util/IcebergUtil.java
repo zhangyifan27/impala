@@ -20,8 +20,6 @@ package org.apache.impala.util;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
-import com.google.common.hash.Hasher;
-import com.google.common.hash.Hashing;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 import com.google.flatbuffers.FlatBufferBuilder;
@@ -35,6 +33,7 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.function.IntFunction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -42,15 +41,21 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DataOperations;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileContent;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.IncrementalAppendScan;
+import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestFiles;
+import org.apache.iceberg.ManifestReader;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -67,16 +72,14 @@ import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.expressions.Term;
 import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.metrics.LoggingMetricsReporter;
 import org.apache.iceberg.metrics.MetricsReporter;
-import org.apache.iceberg.metrics.MetricsReporters;
-import org.apache.iceberg.mr.Catalogs;
 import org.apache.iceberg.transforms.PartitionSpecVisitor;
 import org.apache.iceberg.transforms.Transforms;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.impala.analysis.Analyzer;
+import org.apache.impala.analysis.ArithmeticExpr;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.FunctionCallExpr;
 import org.apache.impala.analysis.FunctionName;
@@ -84,9 +87,14 @@ import org.apache.impala.analysis.FunctionParams;
 import org.apache.impala.analysis.IcebergPartitionField;
 import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.analysis.IcebergPartitionTransform;
+import org.apache.impala.analysis.LiteralExpr;
+import org.apache.impala.analysis.NullLiteral;
 import org.apache.impala.analysis.NumericLiteral;
+import org.apache.impala.analysis.Path;
+import org.apache.impala.analysis.SlotRef;
 import org.apache.impala.analysis.StatementBase;
 import org.apache.impala.analysis.StringLiteral;
+import org.apache.impala.analysis.TableRef;
 import org.apache.impala.analysis.TimeTravelSpec;
 import org.apache.impala.analysis.TimeTravelSpec.Kind;
 import org.apache.impala.catalog.BuiltinsDb;
@@ -95,12 +103,13 @@ import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.FeIcebergTable;
 import org.apache.impala.catalog.HdfsFileFormat;
 import org.apache.impala.catalog.IcebergColumn;
+import org.apache.impala.catalog.IcebergFileDescriptor;
 import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.IcebergTableLoadingException;
 import org.apache.impala.catalog.TableLoadingException;
 import org.apache.impala.catalog.iceberg.GroupedContentFiles;
 import org.apache.impala.catalog.iceberg.IcebergCatalog;
-import org.apache.impala.catalog.iceberg.IcebergCatalogs;
+import org.apache.impala.catalog.iceberg.IcebergCatalogUtil;
 import org.apache.impala.catalog.iceberg.IcebergHadoopCatalog;
 import org.apache.impala.catalog.iceberg.IcebergHadoopTables;
 import org.apache.impala.catalog.iceberg.IcebergHiveCatalog;
@@ -109,17 +118,22 @@ import org.apache.impala.common.FileSystemUtil;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.Pair;
 import org.apache.impala.fb.FbFileMetadata;
+import org.apache.impala.fb.FbSplitFileMetadata;
 import org.apache.impala.fb.FbIcebergDataFile;
+import org.apache.impala.fb.FbIcebergPartitionField;
 import org.apache.impala.fb.FbIcebergDataFileFormat;
+import org.apache.impala.fb.FbIcebergDeletionVector;
 import org.apache.impala.fb.FbIcebergMetadata;
+import org.apache.impala.fb.FbIcebergSplitMetadata;
+import org.apache.impala.fb.FbIcebergPartition;
 import org.apache.impala.fb.FbIcebergPartitionTransformValue;
 import org.apache.impala.fb.FbIcebergTransformType;
 import org.apache.impala.thrift.TCompressionCodec;
 import org.apache.impala.thrift.THdfsCompression;
 import org.apache.impala.thrift.THdfsFileFormat;
 import org.apache.impala.thrift.TIcebergCatalog;
+import org.apache.impala.thrift.TIcebergDeletionVector;
 import org.apache.impala.thrift.TIcebergFileFormat;
-import org.apache.impala.thrift.TIcebergPartition;
 import org.apache.impala.thrift.TIcebergPartitionField;
 import org.apache.impala.thrift.TIcebergPartitionSpec;
 import org.apache.impala.thrift.TIcebergPartitionTransformType;
@@ -128,6 +142,8 @@ import org.slf4j.LoggerFactory;
 
 @SuppressWarnings("UnstableApiUsage")
 public class IcebergUtil {
+  public static final int FORMAT_VERSION_3 = 3;
+
   public static final int ICEBERG_EPOCH_YEAR = 1970;
   private static final int ICEBERG_EPOCH_MONTH = 1;
   @SuppressWarnings("unused")
@@ -167,7 +183,7 @@ public class IcebergUtil {
       case HADOOP_TABLES: return IcebergHadoopTables.getInstance();
       case HIVE_CATALOG: return IcebergHiveCatalog.getInstance();
       case HADOOP_CATALOG: return new IcebergHadoopCatalog(location);
-      case CATALOGS: return IcebergCatalogs.getInstance();
+      case CATALOGS: return IcebergCatalogUtil.getInstance();
       default: throw new ImpalaRuntimeException("Unexpected catalog type: " + catalog);
     }
   }
@@ -209,7 +225,7 @@ public class IcebergUtil {
     String name = msTable.getParameters().get(IcebergTable.ICEBERG_TABLE_IDENTIFIER);
     if (name == null || name.isEmpty()) {
       // Iceberg's Catalogs API uses table property 'name' for the table id.
-      name = msTable.getParameters().get(Catalogs.NAME);
+      name = msTable.getParameters().get(IcebergCatalogUtil.CATALOGS_NAME_PROPERTY);
     }
     if (name == null || name.isEmpty()) {
       return getIcebergTableIdentifier(msTable.getDbName(), msTable.getTableName());
@@ -338,7 +354,7 @@ public class IcebergUtil {
     if (tCat == TIcebergCatalog.HIVE_CATALOG) return true;
     if (tCat == TIcebergCatalog.CATALOGS) {
       String catName = props.get(IcebergTable.ICEBERG_CATALOG);
-      tCat = IcebergCatalogs.getInstance().getUnderlyingCatalogType(catName);
+      tCat = IcebergCatalogUtil.getInstance().getUnderlyingCatalogType(catName);
       return tCat == TIcebergCatalog.HIVE_CATALOG;
     }
     return false;
@@ -389,7 +405,7 @@ public class IcebergUtil {
   public static TIcebergCatalog getUnderlyingCatalog(String catalog) {
     TIcebergCatalog tCat = getTIcebergCatalog(catalog);
     if (tCat == TIcebergCatalog.CATALOGS) {
-      return IcebergCatalogs.getInstance().getUnderlyingCatalogType(catalog);
+      return IcebergCatalogUtil.getInstance().getUnderlyingCatalogType(catalog);
     }
     return tCat;
   }
@@ -734,6 +750,46 @@ public class IcebergUtil {
   }
 
   /**
+   * Returns true if every snapshot in the range (fromSnapshotId, toSnapshotId] is an
+   * append-only operation. Returns false if any snapshot in the range is not an append,
+   * or if the snapshot chain is broken before reaching 'fromSnapshotId'.
+   */
+  public static boolean onlyAppendsBetweenSnapshots(Table icebergApiTable,
+      long fromSnapshotId, long toSnapshotId) {
+    Snapshot current = icebergApiTable.snapshot(toSnapshotId);
+    while (current != null && current.snapshotId() != fromSnapshotId) {
+      if (!DataOperations.APPEND.equals(current.operation())) return false;
+      Long parentId = current.parentId();
+      if (parentId == null) return false;
+      current = icebergApiTable.snapshot(parentId);
+    }
+    return current != null && current.snapshotId() == fromSnapshotId;
+  }
+
+  /**
+   * Returns a GroupedContentFiles containing only the data files added in the snapshot
+   * range (fromSnapshotId, toSnapshotId]. The caller must ensure that all operations in
+   * that range are append-only.
+   */
+  public static GroupedContentFiles getNewIcebergFilesBetweenSnapshots(
+      Table icebergApiTable, long fromSnapshotId, long toSnapshotId)
+      throws TableLoadingException {
+    IncrementalAppendScan scan = icebergApiTable.newIncrementalAppendScan()
+        .fromSnapshotExclusive(fromSnapshotId)
+        .toSnapshot(toSnapshotId);
+    GroupedContentFiles result = new GroupedContentFiles();
+    try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {
+      for (FileScanTask task : tasks) {
+        result.dataFilesWithoutDeletes.add(task.file());
+      }
+    } catch (IOException e) {
+      throw new TableLoadingException(
+          "Error during reading incremental Iceberg manifest files.", e);
+    }
+    return result;
+  }
+
+  /**
    * Use ContentFile path to generate 128-bit XXH128 hash as map key, cached in memory
    */
   public static Hash128 getFilePathHash(ContentFile contentFile) {
@@ -743,8 +799,10 @@ public class IcebergUtil {
   public static Hash128 getFilePathHash(String path) {
     net.openhft.hashing.LongTupleHashFunction hasher =
         net.openhft.hashing.LongTupleHashFunction.xx128();
-    long[] result = hasher.hashChars(path);
-    return new Hash128(result[0], result[1]);
+    ByteBuffer pathBuf = ByteBuffer.wrap(path.getBytes(StandardCharsets.UTF_8));
+    long[] result = hasher.hashBytes(pathBuf);
+    return new Hash128(result[1], result[0]);
+
   }
 
   /**
@@ -755,6 +813,8 @@ public class IcebergUtil {
     switch (fbFileFormat){
       case org.apache.impala.fb.FbIcebergDataFileFormat.PARQUET:
           return org.apache.iceberg.FileFormat.PARQUET;
+      case FbIcebergDataFileFormat.PUFFIN:
+        return FileFormat.PUFFIN;
       default:
           throw new ImpalaRuntimeException(String.format("Unexpected file format: %s",
               org.apache.impala.fb.FbIcebergDataFileFormat.name(fbFileFormat)));
@@ -847,7 +907,28 @@ public class IcebergUtil {
   public static PartitionData partitionDataFromDataFile(Types.StructType partitionType,
       IcebergPartitionSpec spec, FbIcebergDataFile dataFile)
       throws ImpalaRuntimeException {
-    if (dataFile == null || dataFile.rawPartitionFieldsLength() == 0) return null;
+    if (dataFile == null) return null;
+    return partitionDataFromRawFields(partitionType, spec,
+        dataFile.rawPartitionFieldsLength(), dataFile::rawPartitionFields);
+  }
+
+  /**
+   * Create a PartitionData object using partition information from
+   * FbIcebergDeletionVector.
+   */
+  public static PartitionData partitionDataFromDeletionVector(
+      Types.StructType partitionType, IcebergPartitionSpec spec,
+      FbIcebergDeletionVector dv) throws ImpalaRuntimeException {
+    if (dv == null) return null;
+    return partitionDataFromRawFields(partitionType, spec,
+        dv.rawPartitionFieldsLength(), dv::rawPartitionFields);
+  }
+
+  private static PartitionData partitionDataFromRawFields(
+      Types.StructType partitionType, IcebergPartitionSpec spec,
+      int rawFieldsLength, IntFunction<FbIcebergPartitionField> rawFieldAccessor)
+      throws ImpalaRuntimeException {
+    if (rawFieldsLength == 0) return null;
 
     PartitionData data = new PartitionData(spec.getIcebergPartitionFieldsSize());
     int path_i = 0;
@@ -856,9 +937,9 @@ public class IcebergUtil {
       TIcebergPartitionTransformType transformType = field.getTransformType();
       if (transformType == TIcebergPartitionTransformType.VOID) continue;
 
-      Preconditions.checkState(path_i < dataFile.rawPartitionFieldsLength());
+      Preconditions.checkState(path_i < rawFieldsLength);
       ByteBuffer fieldByteBuffer =
-          dataFile.rawPartitionFields(path_i).fieldValueAsByteBuffer();
+          rawFieldAccessor.apply(path_i).fieldValueAsByteBuffer();
 
       Charset charset = StandardCharsets.UTF_8;
       if (field.getType() == org.apache.impala.catalog.Type.BINARY) {
@@ -1110,28 +1191,82 @@ public class IcebergUtil {
     return ret;
   }
 
-  public static TIcebergPartition createIcebergPartitionInfo(
+  public static ByteBuffer createFbIcebergPartition(
       Table iceApiTbl, ContentFile cf) {
-    TIcebergPartition partInfo = new TIcebergPartition(cf.specId(), new ArrayList<>());
+    FlatBufferBuilder fbb = new FlatBufferBuilder();
     PartitionSpec spec = iceApiTbl.specs().get(cf.specId());
-    Preconditions.checkState(spec.fields().size() == cf.partition().size());
-    List<String> partitionKeys = new ArrayList<>();
-    for (int i = 0; i < spec.fields().size(); ++i) {
-      Object partValue = cf.partition().get(i, Object.class);
-      if (partValue != null) {
-        if (partValue instanceof ByteBuffer) {
-          String partValueString =
-              StringUtils.fromByteBuffer((ByteBuffer) partValue, CHARSET_FOR_BINARY);
-          partitionKeys.add(partValueString);
-        } else {
-          partitionKeys.add(partValue.toString());
-        }
-      } else {
-        partitionKeys.add("NULL");
-      }
+    int partKeysOffset = -1;
+    if (spec != null && !spec.fields().isEmpty()) {
+      partKeysOffset = createPartitionKeys(fbb, spec, cf);
     }
-    partInfo.setPartition_values(partitionKeys);
-    return partInfo;
+    FbIcebergPartition.startFbIcebergPartition(fbb);
+    FbIcebergPartition.addSpecId(fbb, cf.specId());
+    if (partKeysOffset != -1) {
+      FbIcebergPartition.addPartitionKeys(fbb, partKeysOffset);
+    }
+    int iceOffset = FbIcebergPartition.endFbIcebergPartition(fbb);
+    fbb.finish(iceOffset);
+    ByteBuffer bb = fbb.dataBuffer().slice();
+    ByteBuffer compressedBb = ByteBuffer.allocate(bb.capacity());
+    compressedBb.put(bb);
+    return (ByteBuffer)compressedBb.flip();
+  }
+
+  /**
+   * Creates a FbSplitFileMetadata object that contains Iceberg file metadata in a
+   * denormalized way: it includes the partition metadata as well in the file descriptor.
+   */
+  public static FbSplitFileMetadata transformFileMetadata(IcebergFileDescriptor fileDesc,
+        ByteBuffer partitionBuf) {
+    FbIcebergPartition partition =
+        FbIcebergPartition.getRootAsFbIcebergPartition(partitionBuf.duplicate());
+    FbIcebergMetadata iceMetadata = fileDesc.getFbFileMetadata().icebergMetadata();
+    FlatBufferBuilder fbb = new FlatBufferBuilder();
+    int partitionKeysOffset = copyPartitionKeys(fbb, partition);
+
+    FbIcebergSplitMetadata.startFbIcebergSplitMetadata(fbb);
+    FbIcebergSplitMetadata.addFileFormat(fbb, iceMetadata.fileFormat());
+    FbIcebergSplitMetadata.addDataSequenceNumber(fbb, iceMetadata.dataSequenceNumber());
+    FbIcebergSplitMetadata.addFirstRowId(fbb, iceMetadata.firstRowId());
+    FbIcebergSplitMetadata.addSpecId(fbb, partition.specId());
+    if (partitionKeysOffset != -1) {
+      FbIcebergSplitMetadata.addPartitionKeys(fbb, partitionKeysOffset);
+    }
+    int iceOffset = FbIcebergSplitMetadata.endFbIcebergSplitMetadata(fbb);
+    fbb.finish(FbSplitFileMetadata.createFbSplitFileMetadata(fbb, iceOffset));
+    ByteBuffer bb = fbb.dataBuffer().slice();
+    ByteBuffer resultBb = ByteBuffer.allocate(bb.capacity());
+    resultBb.put(bb);
+    return FbSplitFileMetadata.getRootAsFbSplitFileMetadata((ByteBuffer)resultBb.flip());
+  }
+
+  private static int copyPartitionKeys(FlatBufferBuilder fbb,
+      FbIcebergPartition partition) {
+    if (partition.partitionKeysLength() == 0) {
+      return -1;
+    }
+    int[] partitionKeyOffsets = new int[partition.partitionKeysLength()];
+    for (int i = 0; i < partition.partitionKeysLength(); i++) {
+      FbIcebergPartitionTransformValue origKey = partition.partitionKeys(i);
+
+      int transformValueOffset = -1;
+      ByteBuffer buf = origKey.transformValueAsByteBuffer();
+      if (buf != null) {
+        byte[] bytes = new byte[buf.remaining()];
+        buf.get(bytes);
+        transformValueOffset = FbIcebergPartitionTransformValue
+            .createTransformValueVector(fbb, bytes);
+      }
+
+      partitionKeyOffsets[i] =
+          FbIcebergPartitionTransformValue.createFbIcebergPartitionTransformValue(
+              fbb,
+              origKey.transformType(),
+              origKey.transformParam(),
+              transformValueOffset,
+              origKey.sourceId());
+    }
+    return FbIcebergSplitMetadata.createPartitionKeysVector(fbb, partitionKeyOffsets);
   }
 
   /**
@@ -1142,7 +1277,7 @@ public class IcebergUtil {
    */
   public static FbFileMetadata createIcebergMetadata(
       Table iceApiTbl, ContentFile cf, int partId) {
-    FlatBufferBuilder fbb = new FlatBufferBuilder(1);
+    FlatBufferBuilder fbb = new FlatBufferBuilder();
     int iceOffset = createIcebergMetadata(iceApiTbl, fbb, cf, partId);
     fbb.finish(FbFileMetadata.createFbFileMetadata(fbb, iceOffset));
     ByteBuffer bb = fbb.dataBuffer().slice();
@@ -1153,11 +1288,6 @@ public class IcebergUtil {
 
   private static int createIcebergMetadata(Table iceApiTbl, FlatBufferBuilder fbb,
       ContentFile cf, int partId) {
-    int partKeysOffset = -1;
-    PartitionSpec spec = iceApiTbl.specs().get(cf.specId());
-    if (spec != null && !spec.fields().isEmpty()) {
-      partKeysOffset = createPartitionKeys(fbb, spec, cf);
-    }
     int eqFieldIdsOffset = -1;
     List<Integer> eqFieldIds = cf.equalityFieldIds();
     if (eqFieldIds != null && !eqFieldIds.isEmpty()) {
@@ -1169,14 +1299,12 @@ public class IcebergUtil {
     if (cf.format() == FileFormat.PARQUET) fileFormat = FbIcebergDataFileFormat.PARQUET;
     else if (cf.format() == FileFormat.ORC) fileFormat = FbIcebergDataFileFormat.ORC;
     else if (cf.format() == FileFormat.AVRO) fileFormat = FbIcebergDataFileFormat.AVRO;
+    else if (cf.format() == FileFormat.PUFFIN) fileFormat =
+        FbIcebergDataFileFormat.PUFFIN;
     if (fileFormat != -1) {
       FbIcebergMetadata.addFileFormat(fbb, fileFormat);
     }
-    FbIcebergMetadata.addSpecId(fbb, cf.specId());
     FbIcebergMetadata.addRecordCount(fbb, cf.recordCount());
-    if (partKeysOffset != -1) {
-      FbIcebergMetadata.addPartitionKeys(fbb, partKeysOffset);
-    }
     if (cf.dataSequenceNumber() != null) {
       FbIcebergMetadata.addDataSequenceNumber(fbb, cf.dataSequenceNumber());
     } else {
@@ -1188,11 +1316,12 @@ public class IcebergUtil {
       // for manifest entries with status DELETED (older Iceberg versions)."
       FbIcebergMetadata.addDataSequenceNumber(fbb, -1l);
     }
-
     if (eqFieldIdsOffset != -1) {
       FbIcebergMetadata.addEqualityFieldIds(fbb, eqFieldIdsOffset);
     }
     FbIcebergMetadata.addPartId(fbb, partId);
+    FbIcebergMetadata.addFirstRowId(fbb,
+        cf.firstRowId() != null ? cf.firstRowId() : -1L);
     return FbIcebergMetadata.endFbIcebergMetadata(fbb);
   }
 
@@ -1204,7 +1333,7 @@ public class IcebergUtil {
       partitionKeyOffsets[i] =
           createPartitionTransformValue(fbb, spec, cf, i);
     }
-    return FbIcebergMetadata.createPartitionKeysVector(fbb, partitionKeyOffsets);
+    return FbIcebergPartition.createPartitionKeysVector(fbb, partitionKeyOffsets);
   }
 
   private static int createPartitionTransformValue(
@@ -1347,6 +1476,24 @@ public class IcebergUtil {
     return props;
   }
 
+  public static FbIcebergDeletionVector createFbIcebergDeletionVector(
+      String path, long contentOffset, long contentSizeInBytes,
+      long referencedDataFileHashHigh, long referencedDataFileHashLow,
+      long recordCount) {
+    FlatBufferBuilder fbb = new FlatBufferBuilder();
+    int pathOffset = fbb.createString(path);
+
+    fbb.finish(
+        FbIcebergDeletionVector.createFbIcebergDeletionVector(fbb, pathOffset,
+            contentOffset, contentSizeInBytes, referencedDataFileHashHigh,
+            referencedDataFileHashLow, recordCount, 0, 0, 0));
+    ByteBuffer bb = fbb.dataBuffer().slice();
+    ByteBuffer compressedBb = ByteBuffer.allocate(bb.capacity());
+    compressedBb.put(bb);
+    return FbIcebergDeletionVector.getRootAsFbIcebergDeletionVector(
+        compressedBb.flip());
+  }
+
   /**
    * Checks the table before insert for unsupported types and file formats.
    */
@@ -1375,6 +1522,44 @@ public class IcebergUtil {
               "files, while table '%s' expects '%s' data files.",
           iceTable.getFullName(), iceTable.getIcebergFileFormat().toString()));
     }
+  }
+
+  /**
+   * Returns the default expression for an unmentioned Iceberg column during DML.
+   * If a write-default is defined in the Iceberg schema metadata, parses and returns it
+   * as a LiteralExpr. Falls back to a typed NullLiteral if no write-default is available.
+   */
+  public static Expr resolveWriteDefault(Column column) throws AnalysisException {
+    if (!(column instanceof IcebergColumn)) {
+      return NullLiteral.create(column.getType());
+    }
+    IcebergColumn iceCol = (IcebergColumn) column;
+    String writeDefault = iceCol.getWriteDefault();
+
+    if (writeDefault != null) {
+      org.apache.impala.catalog.Type colType = column.getType();
+      // Reject TIMESTAMP - LiteralExpr doesn't support it
+      if (colType.isTimestamp()) {
+        throw new AnalysisException(
+            "Iceberg write-default values for TIMESTAMP type are not supported. " +
+            "Please specify value for column '" + column.getName() + "' explicitly.");
+      }
+      // Reject BINARY
+      if (colType.isBinary()) {
+        throw new AnalysisException(
+            "Iceberg write-default values for BINARY/FIXED types are not supported. " +
+            "Please specify value for column '" + column.getName() + "' explicitly.");
+      }
+
+      try {
+        return LiteralExpr.createFromUnescapedStr(writeDefault, colType);
+      } catch (AnalysisException e) {
+        throw new AnalysisException("Failed to parse write-default value '" +
+            writeDefault + "' for column '" + column.getName() + "': " +
+            e.getMessage() + ". Please specify value explicitly.");
+      }
+    }
+    return NullLiteral.create(column.getType());
   }
 
   /**
@@ -1463,6 +1648,17 @@ public class IcebergUtil {
       case TRUNCATE: return "iceberg_truncate_transform";
     }
     return "";
+  }
+
+  public static TIcebergDeletionVector createTIcebergDeletionVector(
+      DeleteFile delFile) {
+    Preconditions.checkState(delFile.content() == FileContent.POSITION_DELETES);
+    Preconditions.checkState(delFile.format() == FileFormat.PUFFIN);
+    TIcebergDeletionVector dv = new TIcebergDeletionVector(
+        delFile.location(),
+        delFile.contentOffset(), delFile.contentSizeInBytes());
+    dv.setRecord_count(delFile.recordCount());
+    return dv;
   }
 
   /**
@@ -1573,5 +1769,130 @@ public class IcebergUtil {
         return sb_.toString();
       }
     }
+  }
+
+  public static void addRowLineageExprs(Analyzer analyzer, TableRef tableRef,
+      List<Expr> resultExprs) throws AnalysisException {
+    FeIcebergTable table = (FeIcebergTable) tableRef.getTable();
+    if (table.getFormatVersion() < FORMAT_VERSION_3) return;
+    resultExprs.add(getAnalyzedRowIdExpr(analyzer, tableRef));
+    resultExprs.add(getAnalyzedLastUpdatedSeqNoExpr(analyzer, tableRef));
+    Preconditions.checkState(resultExprs.size() == table.getColumns().size());
+  }
+
+  /**
+   * Builds an unanalyzed expression equivalent to:
+   *   COALESCE(_file_row_id, ICEBERG__FIRST__ROW__ID + FILE__POSITION)
+   */
+  public static Expr buildRowIdExpr(String tableAlias) {
+    SlotRef fileRowId = new SlotRef(
+        Path.createRawPath(tableAlias, "_file_row_id"));
+    SlotRef firstRowId = new SlotRef(
+        Path.createRawPath(tableAlias, "ICEBERG__FIRST__ROW__ID"));
+    SlotRef filePosition = new SlotRef(
+        Path.createRawPath(tableAlias, "FILE__POSITION"));
+    Expr addExpr = new ArithmeticExpr(
+        ArithmeticExpr.Operator.ADD, firstRowId, filePosition);
+    FunctionCallExpr fnCall = new FunctionCallExpr(
+        "coalesce", Arrays.asList(fileRowId, addExpr));
+    fnCall.setIsInternalFnCall(true);
+    return fnCall;
+  }
+
+  /**
+   * Builds an unanalyzed expression equivalent to:
+   *   COALESCE(_file_last_updated_sequence_number, ICEBERG__DATA__SEQUENCE__NUMBER)
+   */
+  public static Expr buildLastUpdatedSeqNoExpr(String tableAlias) {
+    SlotRef fileLastUpdatedSeqNo = new SlotRef(
+        Path.createRawPath(tableAlias, "_file_last_updated_sequence_number"));
+    SlotRef dataSeqNo = new SlotRef(
+        Path.createRawPath(tableAlias, "ICEBERG__DATA__SEQUENCE__NUMBER"));
+    FunctionCallExpr fnCall = new FunctionCallExpr(
+        "coalesce", Arrays.asList(fileLastUpdatedSeqNo, dataSeqNo));
+    fnCall.setIsInternalFnCall(true);
+    return fnCall;
+  }
+
+  /**
+   * Returns COALESCE(_file_row_id, ICEBERG__FIRST__ROW__ID + FILE__POSITION).
+   */
+  public static Expr getAnalyzedRowIdExpr(Analyzer analyzer, TableRef tableRef)
+      throws AnalysisException {
+    Expr expr = buildRowIdExpr(tableRef.getUniqueAlias());
+    expr.analyze(analyzer);
+    analyzer.materializeSlots(expr);
+    return expr;
+  }
+
+  /**
+   * Returns
+   * COALESCE(_file_last_updated_sequence_number, ICEBERG__DATA__SEQUENCE__NUMBER).
+   */
+  public static Expr getAnalyzedLastUpdatedSeqNoExpr(Analyzer analyzer, TableRef tableRef)
+      throws AnalysisException {
+    Expr expr = buildLastUpdatedSeqNoExpr(tableRef.getUniqueAlias());
+    expr.analyze(analyzer);
+    analyzer.materializeSlots(expr);
+    return expr;
+  }
+
+  /**
+   * Creates a COALESCE function call with the given expressions as parameters.
+   */
+  private static Expr createCoalesceFn(Analyzer analyzer, Expr... exprs)
+      throws AnalysisException {
+    FunctionName fnName = new FunctionName(BuiltinsDb.NAME, "coalesce");
+    List<Expr> paramList = new ArrayList<>();
+    for (Expr expr : exprs) {
+      paramList.add(expr);
+    }
+    FunctionCallExpr fnCall = new FunctionCallExpr(fnName, new FunctionParams(paramList));
+    fnCall.setIsInternalFnCall(true);
+    fnCall.analyze(analyzer);
+    analyzer.materializeSlots(fnCall);
+    return fnCall;
+  }
+
+  public static SlotRef createSlotRef(Analyzer analyzer, TableRef tableRef,
+      String colName) throws AnalysisException {
+    List<String> path = Path.createRawPath(tableRef.getUniqueAlias(), colName);
+    SlotRef ref = new SlotRef(path);
+    ref.analyze(analyzer);
+    return ref;
+  }
+
+  /**
+   * Scans all delete manifests in the given base snapshot and returns a map from
+   * referenced data file path to its corresponding live DeleteFile entry.
+   *
+   * The live manifest entries must be used when calling RowDelta.removeDeletes() so
+   * that the correct partition(), manifestLocation(), and other manifest-sourced
+   * fields are present for Iceberg's ManifestFilterManager to match the entry.
+   */
+  public static Map<String, DeleteFile> lookupDeletionVectors(
+      FeIcebergTable icebergTable, long baseSnapshotId) throws ImpalaRuntimeException {
+    Table table = icebergTable.getIcebergApiTable();
+    Snapshot baseSnapshot = table.snapshot(baseSnapshotId);
+    if (baseSnapshot == null) {
+      throw new ImpalaRuntimeException(String.format(
+          "Base snapshot %d is no longer available; cannot look up deletion vectors. "
+              + "The snapshot may have been expired.", baseSnapshotId));
+    }
+    Map<String, DeleteFile> result = new HashMap<>();
+    for (ManifestFile deleteManifest : baseSnapshot.deleteManifests(table.io())) {
+      try (ManifestReader<DeleteFile> manifestReader = ManifestFiles.readDeleteManifest(
+          deleteManifest, table.io(), table.specs())) {
+        for (DeleteFile deleteFile : manifestReader) {
+          if (deleteFile.referencedDataFile() != null) {
+            result.put(deleteFile.referencedDataFile(), deleteFile);
+          }
+        }
+      } catch (IOException e) {
+        throw new ImpalaRuntimeException(
+            "Unable to read delete manifest while looking up deletion vectors", e);
+      }
+    }
+    return result;
   }
 }

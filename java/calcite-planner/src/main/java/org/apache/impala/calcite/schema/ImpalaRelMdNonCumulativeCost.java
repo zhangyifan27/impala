@@ -18,21 +18,17 @@
 package org.apache.impala.calcite.schema;
 
 import org.apache.calcite.plan.RelOptCost;
-import org.apache.calcite.plan.hep.HepRelVertex;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.metadata.BuiltInMetadata.NonCumulativeCost;
 import org.apache.calcite.rel.metadata.ReflectiveRelMetadataProvider;
-import org.apache.calcite.rel.metadata.RelMdPercentageOriginalRows;
 import org.apache.calcite.rel.metadata.RelMetadataProvider;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.util.BuiltInMethod;
-import org.apache.calcite.util.Pair;
+import org.apache.impala.calcite.rules.ImpalaMQContext;
 
-import com.google.common.collect.ImmutableList;
-import java.util.ArrayList;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -78,11 +74,15 @@ public class ImpalaRelMdNonCumulativeCost implements NonCumulativeCost.Handler {
   }
 
   private RelOptCost getJoinCost(Join join, RelMetadataQuery mq) {
+    return getJoinCost(join.getLeft(), join.getRight(), mq);
+  }
+
+  public static RelOptCost getJoinCost(RelNode left, RelNode right, RelMetadataQuery mq) {
     // 1. Sum of input cardinalities
-    final Double leftRCount = mq.getRowCount(join.getLeft());
-    final Double rightRCount = mq.getRowCount(join.getRight());
-    final Double leftRAverageSize = mq.getAverageRowSize(join.getLeft());
-    final Double rightRAverageSize = mq.getAverageRowSize(join.getRight());
+    final Double leftRCount = mq.getRowCount(left);
+    final Double rightRCount = mq.getRowCount(right);
+    final Double leftRAverageSize = mq.getAverageRowSize(left);
+    final Double rightRAverageSize = mq.getAverageRowSize(right);
 
     if (leftRCount == null || rightRCount == null ||
         leftRAverageSize == null || rightRAverageSize == null) {
@@ -97,6 +97,10 @@ public class ImpalaRelMdNonCumulativeCost implements NonCumulativeCost.Handler {
     // IO cost = cost of transferring small tables to join node
     final double ioCost = rightRCount * rightRAverageSize * netCost;
 
+    LOG.trace("calculating join cost, left row count = {}, left size = {}, " +
+        "right row count = {}, right size = {}", leftRCount, leftRAverageSize,
+        rightRCount, rightRAverageSize);
+
     // Result
     RelOptCost finalCost = ImpalaCost.FACTORY.makeCost(1.0, cpuCost, ioCost);
     return finalCost;
@@ -104,7 +108,26 @@ public class ImpalaRelMdNonCumulativeCost implements NonCumulativeCost.Handler {
 
   private RelOptCost getScanCost(TableScan scan, RelMetadataQuery mq) {
     double cardinality = mq.getRowCount(scan);
-    double avgTupleSize = mq.getAverageRowSize(scan);
+    double avgTupleSize = 0.0;
+    ImpalaMQContext mqContext =
+        scan.getCluster().getPlanner().getContext().unwrap(ImpalaMQContext.class);
+    if (mqContext.getInputRefs() != null && !mqContext.getInputRefs().isEmpty()) {
+      // The avgColumnSizes list contains an entry in the ArrayList for every column
+      // that exists in the table.
+      List<Double> avgColumnSizes = mq.getAverageColumnSizes(scan);
+      // The mqContext.getInputRefs() contains only the columns needed by the parent.
+      // This allows us to calculate the tuple size of only the columns that are used
+      // by the parent.
+      for (Integer i : mqContext.getInputRefs()) {
+        avgTupleSize += avgColumnSizes.get(i);
+      }
+    } else {
+      avgTupleSize = mq.getAverageRowSize(scan);
+    }
+
+    LOG.trace("calculating scan cost for {}, cardinality = {}, avgTupleSize = {}",
+        scan.getTable(), cardinality, avgTupleSize);
+
     return new ImpalaCost(0, hdfsRead * cardinality * avgTupleSize);
   }
 
@@ -137,6 +160,9 @@ public class ImpalaRelMdNonCumulativeCost implements NonCumulativeCost.Handler {
     ioCost += rCount * rAverageSize * localFSRead;
     // Net transfer cost
     ioCost += rCount * rAverageSize * netCost;
+
+    LOG.trace("calculating aggregate cost: row count = {}, average size = {} ",
+        rCount, rAverageSize);
 
     // Result
     return ImpalaCost.FACTORY.makeCost(1.0, cpuCost, ioCost);

@@ -108,6 +108,11 @@ struct NullIndicatorOffset {
   // this struct changes.
   llvm::Constant* ToIR(LlvmCodeGen* codegen) const;
 
+  // Generates a packed i64 constant of this offset. This can be used when passing a
+  // constant offset to a function which expects it as a packed i64. Needs to be updated
+  // if the layout of this struct changes.
+  llvm::Constant* ToIRPacked(LlvmCodeGen* codegen) const;
+
   static const char* LLVM_CLASS_NAME;
 };
 
@@ -342,6 +347,8 @@ class ColumnDescriptor {
   int field_id() const { return field_id_; }
   int field_map_key_id() const { return field_map_key_id_; }
   int field_map_value_id() const { return field_map_value_id_; }
+  const std::string& initial_default() const { return initial_default_; }
+  bool is_nullable() const { return is_nullable_; }
 
   std::string DebugString() const;
 
@@ -352,6 +359,8 @@ class ColumnDescriptor {
   int field_id_ = -1;
   int field_map_key_id_ = -1;
   int field_map_value_id_ = -1;
+  std::string initial_default_;
+  bool is_nullable_ = true;
 };
 
 /// Base class for table descriptors.
@@ -517,6 +526,10 @@ class HdfsTableDescriptor : public TableDescriptor {
     return iceberg_spec_id_;
   }
 
+  int32_t IcebergFormatVersion() const {
+    return iceberg_format_version_;
+  }
+
   virtual std::string DebugString() const;
 
  protected:
@@ -539,6 +552,7 @@ class HdfsTableDescriptor : public TableDescriptor {
   int64_t iceberg_parquet_plain_page_size_;
   int64_t iceberg_parquet_dict_page_size_;
   int32_t iceberg_spec_id_;
+  int32_t iceberg_format_version_;
 };
 
 class HBaseTableDescriptor : public TableDescriptor {

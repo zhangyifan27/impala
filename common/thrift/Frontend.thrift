@@ -63,6 +63,13 @@ struct THiveUdfExecutorCtorParams {
   // NULL.
   6: required i64 output_null_ptr
   7: required i64 output_buffer_ptr
+
+  // is_constant_arg[i] is true iff the i-th argument is a constant.
+  // Constant arguments are only copied to the input buffer once, to save
+  // re-evaluation and extra copying for every evaluation.
+  // The information about an argument being a constant is also forwarded
+  // to Hive UDF executor, for further optimization when possible.
+  8: optional list<bool> is_constant_arg
 }
 
 // Arguments to getTableNames, which returns a list of tables that are of specified table
@@ -254,7 +261,11 @@ struct TShowStatsParams {
   2: CatalogObjects.TTableName table_name
   3: optional bool show_column_minmax_stats
   // Optional: filtered partition ids for SHOW PARTITIONS with a WHERE clause.
+  // Only used for HDFS tables.
   4: optional list<i64> filtered_partition_ids
+  // Optional: For Iceberg tables with WHERE clause in SHOW PARTITIONS, this contains
+  // the pre-computed filtered Iceberg partition stats.
+  5: optional Results.TResultSet filtered_iceberg_partition_stats
 }
 
 // Parameters for DESCRIBE HISTORY command
@@ -331,6 +342,16 @@ struct TShowRolesParams {
 // Result of a SHOW ROLES command
 struct TShowRolesResult {
   1: required list<string> role_names
+}
+
+struct TShowCurrentGroupsParams {
+  // The user running the statement
+  1: required string requesting_user
+}
+
+struct TShowCurrentGroupsResult {
+  // A list of groups the user belongs to
+  1: required list<string> group_names
 }
 
 // Represents one row in the DESCRIBE HISTORY command's result.
@@ -476,6 +497,7 @@ enum TCatalogOpType {
   DESCRIBE_HISTORY = 15
   SHOW_VIEWS = 16
   SHOW_METADATA_TABLES = 17
+  SHOW_CURRENT_GROUPS = 18
 }
 
 // TODO: Combine SHOW requests with a single struct that contains a field
@@ -545,6 +567,9 @@ struct TCatalogOpRequest {
 
   // Partition limit for SHOW CREATE TABLE WITH STATS
   21: optional i32 show_create_table_partition_limit
+
+  // Parameters for SHOW CURRENT GROUPS
+  22: optional TShowCurrentGroupsParams show_current_groups_params
 }
 
 // Query options type

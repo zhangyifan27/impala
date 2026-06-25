@@ -53,7 +53,6 @@
 #   $IMPALA_TOOLCHAIN_PACKAGES_HOME/breakpad-*/bin/minidump_stackwalk \
 #   /tmp/impala-minidumps/impalad/03c0ee26-bfd1-cf3e-43fa49ca-1a6aae25.dmp /tmp/syms
 
-from __future__ import absolute_import, division, print_function
 import errno
 import logging
 import magic
@@ -178,7 +177,7 @@ def is_regular_file(path):
 
 def is_elf_file(path):
   """Check whether 'path' is an ELF file."""
-  return is_regular_file(path) and b'ELF' in magic.from_file(path)
+  return is_regular_file(path) and 'ELF' in magic.from_file(path)
 
 
 def find_elf_files(path):

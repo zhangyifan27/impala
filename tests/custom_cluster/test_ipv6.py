@@ -16,11 +16,11 @@
 # under the License.
 #
 
-from __future__ import absolute_import, division, print_function
 import json
 import logging
 import os
 import pytest
+import re
 import requests
 import sys
 
@@ -66,11 +66,8 @@ WEBUI_PORTS = [25000, 25010, 25020]
 
 # Error text can depend on both protocol and python version.
 CONN_ERR = ["Could not connect", "Connection refused"]
-# Due to THRIFT-792, SSL errors are suppressed when using OpenSSL hostname verification.
-# This is the only option on Python 3.12+, using ssl.PROTOCOL_TLS_CLIENT.
-CERT_ERR = ["doesn't match", "certificate verify failed", "Could not connect"]
-WEB_CERT_ERR = ("CertificateError" if sys.version_info.major < 3
-                else "SSLCertVerificationError")
+CERT_ERR = ["doesn't match", "certificate verify failed"]
+WEB_CERT_ERR = "SSLCertVerificationError"
 
 
 class TestIPv6Base(CustomClusterTestSuite):
@@ -92,11 +89,11 @@ class TestIPv6Base(CustomClusterTestSuite):
       port = self._get_default_port(proto)
       host_port = "%s:%d" % (host, port)
       use_ssl = self.ca_cert is not None
-      conn = create_connection(host_port, protocol=proto, use_ssl=use_ssl)
-      conn.connect()
-      assert not expected_errors
-      res = conn.execute("select 1")
-      assert res.data == ["1"]
+      with create_connection(host_port, protocol=proto, use_ssl=use_ssl) as conn:
+        conn.connect()
+        assert not expected_errors
+        res = conn.execute("select 1")
+        assert res.data == ["1"]
     except Exception as ex:
       for err in expected_errors:
         if err in str(ex): return
@@ -104,17 +101,25 @@ class TestIPv6Base(CustomClusterTestSuite):
 
   def _webui_smoke(self, url, err=None):
     """Tests to check glibc version and locale is available"""
+    verify_param = self.ca_cert if self.ca_cert else False
     try:
-      if self.ca_cert:
-        other_info_page = requests.get(url + "/?json", verify=self.ca_cert).text
-      else:
-        other_info_page = requests.get(url + "/?json", verify=False).text
+      json_resp = requests.get(url + "/?json", verify=verify_param).text
       assert err is None
-      other_info = json.loads(other_info_page)
+      other_info = json.loads(json_resp)
       assert "glibc_version" in other_info
     except Exception as ex:
       if not err: raise ex
       assert err in str(ex)
+
+    if err: return
+    # If successful, also check with x-forwarded-context to verify that
+    # links are to the host name and not to "::" in the result (IMPALA-14781)
+    # With x-forwarded-context absolute links are used instead of relative
+    # ones. See TestWebPage.test_knox_compatibility for a more complex test about this.
+    headers = {'x-forwarded-context': 'abc'}
+    html_resp = requests.get(url, headers=headers, verify=verify_param).text
+    assert re.search(r'href="https?://.+:', html_resp)
+    assert not re.search(r'href="https?://\[?::\]?:', html_resp)
 
   def _shell_smoke(self, host, vector, expected_errors=[]):
     proto = vector.get_value('protocol')
@@ -209,8 +214,8 @@ class TestIPv6DualSsl(TestIPv6Base):
       self._webui_smoke("https://ip6.impala.test:%d" % port)
       self._webui_smoke("https://ip46.impala.test:%d" % port)
 
-    self._smoke("[::1]", vector, CONN_ERR)
-    self._smoke("127.0.0.1", vector, CONN_ERR)
+    self._smoke("[::1]", vector, CERT_ERR)
+    self._smoke("127.0.0.1", vector, CERT_ERR)
     self._smoke("ip4.impala.test", vector)
     self._smoke("ip6.impala.test", vector)
     self._smoke("ip46.impala.test", vector)
@@ -242,7 +247,7 @@ class TestIPv6OnlySsl(TestIPv6Base):
       self._webui_smoke("https://ip6.impala.test:%d" % port)
       self._webui_smoke("https://ip46.impala.test:%d" % port)
 
-    self._smoke("[::1]", vector, CONN_ERR)
+    self._smoke("[::1]", vector, CERT_ERR)
     self._smoke("127.0.0.1", vector, CONN_ERR)
     self._smoke("ip4.impala.test", vector, CONN_ERR)
     self._smoke("ip6.impala.test", vector)

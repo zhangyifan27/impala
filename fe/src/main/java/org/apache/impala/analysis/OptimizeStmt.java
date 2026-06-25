@@ -169,6 +169,12 @@ public class OptimizeStmt extends DmlStatementBase {
     FeIcebergTable iceTable = (FeIcebergTable) table_;
     IcebergUtil.validateIcebergTableForInsert(iceTable);
 
+    if (iceTable.getFormatVersion() > 3) {
+      throw new AnalysisException(String.format(
+          "Impala does not support OPTIMIZE statements on Iceberg tables with format " +
+              "version %d", iceTable.getFormatVersion()));
+    }
+
     selectFiles(iceTable);
 
     prepareExpressions(analyzer);
@@ -258,7 +264,8 @@ public class OptimizeStmt extends DmlStatementBase {
     List<SelectListItem> selectListItems = new ArrayList<>();
     for (Column col : columns) {
       selectListItems.add(
-          new SelectListItem(createSlotRef(analyzer, col.getName()), null));
+          new SelectListItem(
+              IcebergUtil.createSlotRef(analyzer, tableRef_, col.getName()), null));
     }
     SelectList selectList = new SelectList(selectListItems);
     sourceStmt_ = new SelectStmt(selectList, new FromClause(tableRefs), null,
@@ -269,21 +276,13 @@ public class OptimizeStmt extends DmlStatementBase {
   }
 
   private void prepareExpressions(Analyzer analyzer) throws AnalysisException {
-    List<Column> columns = table_.getColumns();
+    List<Column> columns = table_.getColumnsInHiveOrder();
     for (Column col : columns) {
-      resultExprs_.add(createSlotRef(analyzer, col.getName()));
+      resultExprs_.add(IcebergUtil.createSlotRef(analyzer, tableRef_, col.getName()));
     }
+    IcebergUtil.addRowLineageExprs(analyzer, tableRef_, resultExprs_);
     IcebergUtil.populatePartitionExprs(analyzer, null, columns,
         resultExprs_, (FeIcebergTable) table_, partitionKeyExprs_, null);
-  }
-
-  private SlotRef createSlotRef(Analyzer analyzer, String colName)
-      throws AnalysisException {
-    List<String> path = org.apache.impala.analysis.Path
-        .createRawPath(tableRef_.getUniqueAlias(), colName);
-    SlotRef ref = new SlotRef(path);
-    ref.analyze(analyzer);
-    return ref;
   }
 
   /**

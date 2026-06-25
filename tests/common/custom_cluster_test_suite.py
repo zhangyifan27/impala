@@ -18,13 +18,12 @@
 # Superclass for all tests that need a custom cluster.
 # TODO: Configure cluster size and other parameters.
 
-from __future__ import absolute_import, division, print_function
 import inspect
 import logging
 import os
 import os.path
-import pipes
 import pytest
+import shlex
 import subprocess
 
 from glob import glob
@@ -167,7 +166,8 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       impalad_timeout_s=None, expect_cores=None, reset_ranger=False,
       tmp_dir_placeholders=[],
       expect_startup_fail=False, disable_log_buffering=False, log_symlinks=False,
-      workload_mgmt=False, force_restart=False, custom_core_site_dir=None):
+      workload_mgmt=False, force_restart=False, custom_core_site_dir=None,
+      admissiond_args=None):
     """Records arguments to be passed to a cluster by adding them to the decorated
     method's func_dict"""
     args = dict()
@@ -217,6 +217,8 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       # When sharding tests, always restart the cluster to avoid issues with tests
       # that depend on a specific test order within a shard.
       args[FORCE_RESTART] = True
+    if admissiond_args is not None:
+      args[ADMISSIOND_ARGS] = admissiond_args
 
     def merge_args(args_first, args_last):
       result = args_first.copy()
@@ -230,7 +232,8 @@ class CustomClusterTestSuite(ImpalaTestSuite):
               CATALOGD_ARGS,
               START_ARGS,
               JVM_ARGS,
-              KUDU_ARGS
+              KUDU_ARGS,
+              ADMISSIOND_ARGS
           ):
             # Let the server decide.
             result[key] = " ".join((result[key], args_last[key]))
@@ -409,6 +412,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
           raise e
 
   def setup_method(self, method):
+    super().setup_method(method)
     if not self.SHARED_CLUSTER_ARGS:
       # Store the test method name so that we can put logs in different directories for
       # different tests. This only applies if the cluster is being restarted per test
@@ -445,6 +449,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       super(CustomClusterTestSuite, cls).teardown_class()
 
   def teardown_method(self, method):
+    super().teardown_method(method)
     if not self.SHARED_CLUSTER_ARGS:
       self.cluster_teardown(method.__name__, method.__dict__)
     self.set_current_test_method_name(None)
@@ -574,6 +579,29 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       log.info(file_list)
 
   @classmethod
+  def calculate_impala_log_dir(cls):
+    """This calculates a log directory for the current test that includes the class
+       name and test function name."""
+    # To find the log directory, we proceed in this order:
+    # 1. LOG_DIR environment variable (used in test scripts for Jenkins jobs, etc)
+    # 2. IMPALA_CUSTOM_CLUSTER_TEST_LOGS_DIR - set impala-config.sh (used in devenvs)
+    # 3. /tmp/ - This probably shouldn't happen, but at least the logs can go somewhere
+    impala_base_log_dir = os.getenv("LOG_DIR",
+        os.getenv("IMPALA_CUSTOM_CLUSTER_TEST_LOGS_DIR", "/tmp/"))
+
+    # To make it easier to find logs across multiple custom cluster tests, organize
+    # them into subdirectories based on their test class and their test method name
+    # (where applicable).
+    impala_log_dir_per_test = os.path.join(impala_base_log_dir, cls.__name__)
+    # The CURRENT_TEST_METHOD_NAME will be None when using SHARED_CLUSTER_ARGS as the
+    # cluster is not restarted for each test method
+    if cls.CURRENT_TEST_METHOD_NAME:
+      impala_log_dir_per_test = os.path.join(impala_log_dir_per_test,
+          cls.CURRENT_TEST_METHOD_NAME)
+
+    return impala_log_dir_per_test
+
+  @classmethod
   def _start_impala_cluster(cls,
                             options,
                             impala_log_dir=None,
@@ -598,22 +626,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
       cls.impala_log_dir = impala_log_dir
     else:
       # The test didn't customize the log dir, so calculate a reasonable base directory
-      # To find the log directory, we proceed in this order:
-      # 1. LOG_DIR environment variable (used in test scripts for Jenkins jobs, etc)
-      # 2. IMPALA_CUSTOM_CLUSTER_TEST_LOGS_DIR - set impala-config.sh (used in devenvs)
-      # 3. /tmp/ - This probably shouldn't happen, but at least the logs can go somewhere
-      impala_base_log_dir = os.getenv("LOG_DIR",
-          os.getenv("IMPALA_CUSTOM_CLUSTER_TEST_LOGS_DIR", "/tmp/"))
-
-      # To make it easier to find logs across multiple custom cluster tests, organize
-      # them into subdirectories based on their test class and their test method name
-      # (where applicable).
-      impala_log_dir_per_test = os.path.join(impala_base_log_dir, cls.__name__)
-      # The CURRENT_TEST_METHOD_NAME will be None when using SHARED_CLUSTER_ARGS as the
-      # cluster is not restarted for each test method
-      if cls.CURRENT_TEST_METHOD_NAME:
-        impala_log_dir_per_test = os.path.join(impala_log_dir_per_test,
-            cls.CURRENT_TEST_METHOD_NAME)
+      impala_log_dir_per_test = cls.calculate_impala_log_dir()
 
       if not os.path.isdir(impala_log_dir_per_test):
         os.makedirs(impala_log_dir_per_test)
@@ -657,7 +670,7 @@ class CustomClusterTestSuite(ImpalaTestSuite):
     options.append("--impalad_args=--default_query_options={0}".format(
         ','.join(["{0}={1}".format(k, v) for k, v in default_query_option_kvs])))
 
-    cmd_str = " ".join(pipes.quote(arg) for arg in cmd + options)
+    cmd_str = " ".join(shlex.quote(arg) for arg in cmd + options)
 
     # If the cluster is already started, we don't need to start it again, unless
     # force_restart is set to True. NOTE: reordering tests into classes with class-level
@@ -679,7 +692,16 @@ class CustomClusterTestSuite(ImpalaTestSuite):
 
     LOG.info("Starting cluster with command: %s" % cmd_str)
     try:
-      check_call(cmd + options, close_fds=True)
+      subprocess.run(
+          cmd + options, close_fds=True, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+      out = e.output if e.output is not None else ""
+      err = e.stderr if e.stderr is not None else ""
+      detail_msg = (
+          "start-impala-cluster.py failed (exit code %d).\nstdout:\n%s\nstderr:\n%s"
+          % (e.returncode, out, err))
+      LOG.error(detail_msg)
+      raise
     finally:
       if log_symlinks:
         cls._log_symlinks(log=LOG)

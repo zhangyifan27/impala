@@ -21,10 +21,9 @@ import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.function.Function;
 import org.apache.iceberg.PartitionSpec;
-import org.apache.impala.catalog.FeIcebergTable;
-import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.ImpalaRuntimeException;
+import org.apache.impala.rewrite.BetweenToCompoundRule;
 import org.apache.impala.thrift.TIcebergPartitionTransformType;
 import org.apache.impala.util.IcebergUtil;
 
@@ -57,6 +56,14 @@ class IcebergPartitionExpressionRewriter {
    * @throws AnalysisException when expression rewrite fails
    */
   public Expr rewrite(Expr expr) throws AnalysisException {
+    // BoolLiterals don't need rewriting, return as-is
+    if (expr instanceof BoolLiteral) {
+      return expr;
+    }
+    if (expr instanceof BetweenPredicate) {
+      BetweenPredicate betweenPredicate = (BetweenPredicate) expr;
+      return rewrite(betweenPredicate);
+    }
     if (expr instanceof BinaryPredicate) {
       BinaryPredicate binaryPredicate = (BinaryPredicate) expr;
       return rewrite(binaryPredicate);
@@ -78,11 +85,25 @@ class IcebergPartitionExpressionRewriter {
       return rewrite(isNullPredicate);
     }
     if (expr instanceof InPredicate) {
-      InPredicate isNullPredicate = (InPredicate) expr;
-      return rewrite(isNullPredicate);
+      InPredicate inPredicate = (InPredicate) expr;
+      return rewrite(inPredicate);
+    }
+    if (expr instanceof LikePredicate) {
+      LikePredicate likePredicate = (LikePredicate) expr;
+      return rewrite(likePredicate);
     }
     throw new AnalysisException(
         "Invalid partition filtering expression: " + expr.toSql());
+  }
+
+  private CompoundPredicate rewrite(BetweenPredicate betweenPredicate)
+      throws AnalysisException {
+    Expr compoundPredicate =
+        BetweenToCompoundRule.INSTANCE.apply(betweenPredicate, analyzer_);
+    if (!compoundPredicate.isAnalyzed()) {
+      compoundPredicate.analyze(analyzer_);
+    }
+    return rewrite((CompoundPredicate) compoundPredicate);
   }
 
   private BinaryPredicate rewrite(BinaryPredicate binaryPredicate)
@@ -139,6 +160,20 @@ class IcebergPartitionExpressionRewriter {
               .set(affectedChildId, numericLiteral));
     }
     return inPredicate;
+  }
+
+  private LikePredicate rewrite(LikePredicate likePredicate)
+      throws AnalysisException {
+    Expr term = likePredicate.getChild(0);
+    IcebergPartitionExpr partitionExpr;
+    if (term instanceof SlotRef) {
+      partitionExpr = rewrite((SlotRef) term);
+      likePredicate.getChildren().set(0, partitionExpr);
+    } else if (term instanceof FunctionCallExpr) {
+      partitionExpr = rewrite((FunctionCallExpr) term);
+      likePredicate.getChildren().set(0, partitionExpr);
+    }
+    return likePredicate;
   }
 
   private void rewriteDateTransformConstants(LiteralExpr literal,

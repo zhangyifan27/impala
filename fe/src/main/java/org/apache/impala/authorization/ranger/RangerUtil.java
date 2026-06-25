@@ -19,7 +19,6 @@ package org.apache.impala.authorization.ranger;
 
 import com.google.common.collect.Sets;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.impala.authorization.AuthorizationFactory;
 import org.apache.impala.common.RuntimeEnv;
 import org.apache.impala.service.BackendConfig;
 import org.apache.impala.thrift.TPrivilege;
@@ -28,7 +27,6 @@ import org.apache.ranger.plugin.model.RangerRole;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Predicate;
 
 /**
  * Collection of static functions to support Apache Ranger implementation
@@ -92,19 +90,19 @@ public class RangerUtil {
   }
 
   /**
-   * This method returns the groups that 'user' belongs to. By starting impalad and
-   * catalogd with the argument of "use_customized_user_groups_mapper_for_ranger",
+   * This method returns the groups that 'userShortName' belongs to. By starting impalad
+   * and catalogd with the argument of "use_customized_user_groups_mapper_for_ranger",
    * the customized user-to-groups mapper would be provided, which is useful in the
    * testing environment.
    */
-  public static Set<String> getGroups(String user) {
+  public static Set<String> getGroups(String userShortName) {
     UserGroupInformation ugi;
     if (RuntimeEnv.INSTANCE.isTestEnv() ||
         BackendConfig.INSTANCE.useCustomizedUserGroupsMapperForRanger()) {
-      ugi = UserGroupInformation.createUserForTesting(user,
-          new String[]{user});
+      ugi = UserGroupInformation.createUserForTesting(userShortName,
+          new String[]{userShortName});
     } else {
-      ugi = UserGroupInformation.createRemoteUser(user);
+      ugi = UserGroupInformation.createRemoteUser(userShortName);
     }
     return Sets.newHashSet(ugi.getGroupNames());
   }

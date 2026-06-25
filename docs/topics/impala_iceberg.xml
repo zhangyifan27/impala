@@ -271,6 +271,49 @@ ALTER TABLE ice_v1_to_v2 SET TBLPROPERTIES('format-version'='2');
     </conbody>
   </concept>
 
+  <concept id="iceberg_convert">
+    <title>Converting existing tables to Iceberg tables</title>
+    <conbody>
+      <p>
+        Since <keyword keyref="impala43"/> Impala also supports converting legacy Hive
+        tables to Iceberg tables. The target Iceberg tables inherit the location of the
+        original Hive tables. The Hive table to be converted must follow these
+        requirements:
+        <ul>
+          <li>table is not a transactional table,</li>
+          <li>InputFormat must be either PARQUET, ORC, or AVRO,</li>
+          <li>the user has “ALL” privileges on the database containing the table.</li>
+        </ul>
+        If the Hive table meets these requirements, then it can be converted to an Iceberg
+        table via an
+        <codeph>ALTER TABLE [dbname.]table_name CONVERT TO ICEBERG [TBLPROPERTIES(...)];</codeph>
+        statement, e.g.:
+        <codeblock>
+ALTER TABLE non_iceberg_table CONVERT TO ICEBERG;
+ALTER TABLE non_iceberg_table CONVERT TO ICEBERG TBLPROPERTIES('iceberg.catalog'='hadoop.tables');
+        </codeblock>
+      </p>
+      <p>
+        This command only accepts 'iceberg.catalog' (from <keyword keyref="impala43"/>)
+        and 'format-version' (from <keyword keyref="impala50"/>) as table properties.
+      </p>
+      <p>
+        This is an in-place migration so the original data files of the legacy Hive table
+        are re-used and not moved, copied or re-created by this operation. The new Iceberg
+        table will have the 'external.table.purge' property set to 'true' after the
+        migration.
+      </p>
+      <p>
+        From <keyword keyref="impala50"/> one can also specify the 'format-version' of the
+        new Iceberg table during conversion, e.g.:
+        <codeblock>
+ALTER TABLE non_iceberg_table CONVERT TO ICEBERG TBLPROPERTIES('format-version'='1');
+        </codeblock>
+        If 'format-version' is omitted, Impala will use the default Iceberg format version.
+      </p>
+    </conbody>
+  </concept>
+
   <concept id="iceberg_drop">
     <title>Dropping Iceberg tables</title>
     <conbody>
@@ -470,6 +513,52 @@ CREATE TABLE ice_p (i INT, b INT) PARTITIONED BY (p1 INT, p2 STRING) STORED AS I
       <p>
         One can inspect a table's partition spec by the <codeph>SHOW PARTITIONS</codeph> or
         <codeph>SHOW CREATE TABLE</codeph> commands.
+      </p>
+    </conbody>
+  </concept>
+
+  <concept id="iceberg_show_partitions">
+    <title>Filtering partition information with SHOW PARTITIONS WHERE</title>
+    <conbody>
+      <p>
+        Since <keyword keyref="impala50"/> Impala supports filtering partition information using the
+        <codeph>SHOW PARTITIONS</codeph> statement with a <codeph>WHERE</codeph> clause for Iceberg tables.
+        This allows you to view only specific partitions that match the given filter criteria.
+      </p>
+      <p>
+        Example:
+        <codeblock>
+SHOW PARTITIONS functional_parquet.iceberg_partitioned WHERE action = 'click';
+SHOW PARTITIONS ice_t WHERE hour(event_time) > 438296 AND status != 'pending';
+SHOW PARTITIONS ice_t WHERE year(date_col) BETWEEN 2020 AND 2023;
+        </codeblock>
+      </p>
+      <p>
+        Limitations:
+        <ul>
+          <li>
+            Only simple predicates on partition columns are supported. Standard SQL functions
+            (e.g., <codeph>rand()</codeph>, <codeph>upper()</codeph>, <codeph>length()</codeph>) are not allowed
+            in the <codeph>WHERE</codeph> clause.
+          </li>
+          <li>
+            Supported predicates include column comparisons, <codeph>BETWEEN</codeph>, <codeph>IN</codeph>,
+            <codeph>IS NULL</codeph>/<codeph>IS NOT NULL</codeph>, and logical operators (<codeph>AND</codeph>,
+            <codeph>OR</codeph>, <codeph>NOT</codeph>).
+          </li>
+          <li>
+            Iceberg partition transforms (<codeph>year()</codeph>, <codeph>month()</codeph>, <codeph>day()</codeph>,
+            <codeph>hour()</codeph>, <codeph>bucket()</codeph>, <codeph>truncate()</codeph>) can be used in predicates.
+          </li>
+          <li>
+            For more complex queries with functions or aggregations, use Iceberg metadata tables instead:
+            <codeblock>SELECT * FROM table_name.partitions WHERE &lt;complex predicate&gt;</codeblock>
+          </li>
+        </ul>
+      </p>
+      <p>
+        More information about the <codeph>SHOW PARTITIONS</codeph> statement can be found at
+        <xref href="impala_show.xml#show_partitions"/>.
       </p>
     </conbody>
   </concept>
@@ -1022,8 +1111,8 @@ ORDER BY made_current_at;
       is more recent.
       </p>
       <p>
-      Reading Puffin stats is disabled by default; set the "--enable_reading_puffin_stats"
-      startup flag to true to enable it.
+      Reading Puffin stats is enabled by default. Set the "--enable_reading_puffin_stats"
+      startup flag to false to disable it.
       </p>
       <p>
       Some engines, e.g. Trino, also write the NDV as a property (with key "ndv") in the

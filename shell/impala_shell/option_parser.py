@@ -247,14 +247,22 @@ def get_option_parser(defaults):
                     help="User to authenticate with.")
   parser.add_option("--ssl", dest="ssl",
                     action="store_true",
-                    help="Connect to Impala via SSL-secured connection \t")
+                    help="Connect to Impala via SSL-secured connection. Does not verify "
+                    "the server's TLS certificate by default (see --ca_cert and "
+                    "--verify_cert options).")
   parser.add_option("--ca_cert", dest="ca_cert",
                     help=("Full path to "
                     "certificate file used to authenticate Impala's SSL certificate."
                     " May either be a copy of Impala's certificate (for self-signed "
                     "certs) or the certificate of a trusted third-party CA. If not set, "
-                    "but SSL is enabled, the shell will NOT verify Impala's server "
-                    "certificate"))
+                    "but SSL is enabled, server verification is based on --verify_cert "
+                    "flag."))
+  parser.add_option("--verify_cert", dest="verify_cert",
+                    action="store_true",
+                    help=("Verify the Impala server's TLS certificate using the "
+                    "system's default CA certificates when SSL is enabled and --ca_cert "
+                    "is not set. If --ca_cert is set, the server certificate will always "
+                    "be verified using the provided CA cert regardless of this flag."))
   parser.add_option("--config_file", dest="config_file",
                     help=("Specify the configuration file to load options. "
                           "The following sections are used: [impala], "

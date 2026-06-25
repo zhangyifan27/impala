@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import os
 import ssl
 import sys
@@ -29,18 +28,11 @@ import pytest
 # to mask it.
 from impala_shell.impala_shell import ImpalaShell as ImpalaShellClass
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
-from tests.common.environ import IS_REDHAT_DERIVATIVE
 from tests.common.test_dimensions import create_client_protocol_dimension
 from tests.common.test_vector import ImpalaTestVector
 from tests.shell.util import ImpalaShell
 
 REQUIRED_MIN_OPENSSL_VERSION = 0x10001000
-# Python supports TLSv1.2 from 2.7.9 officially but on Red Hat/CentOS Python2.7.5
-# with newer python-libs (eg python-libs-2.7.5-77) supports TLSv1.2 already
-if IS_REDHAT_DERIVATIVE:
-  REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12 = (2, 7, 5)
-else:
-  REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12 = (2, 7, 9)
 _openssl_version_number = getattr(ssl, "OPENSSL_VERSION_NUMBER", None)
 if _openssl_version_number is None:
   SKIP_SSL_MSG = "Legacy OpenSSL module detected"
@@ -65,12 +57,6 @@ IDLE_ARGS = " --idle_client_poll_period_s=1 -v=2"
 
 class TestThriftSocket(CustomClusterTestSuite):
   """ Check if thrift timeout errors are detected properly """
-
-  @classmethod
-  def setup_class(cls):
-    if sys.version_info < REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12:
-      pytest.skip("Python version does not support tls 1.2")
-    super(TestThriftSocket, cls).setup_class()
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(

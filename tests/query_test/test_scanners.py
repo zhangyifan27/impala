@@ -21,15 +21,12 @@
 # tests can run with the normal exploration strategy and the overall test runtime doesn't
 # explode.
 
-from __future__ import absolute_import, division, print_function
 from copy import deepcopy
 import os
 import random
 import re
 from subprocess import check_call
 import tempfile
-
-from builtins import range
 import pytest
 
 from impala_thrift_gen.parquet.ttypes import ConvertedType
@@ -1309,6 +1306,12 @@ class TestParquet(ImpalaTestSuite):
     query_sql = "SELECT * FROM {} where field1 = '123'".format(table_name)
     self.execute_query_expect_success(self.client, query_sql)
 
+  def test_lz4_raw_compression(self, vector, unique_database):
+    """IMPALA-14700: Test that we can read a parquet file with LZ4_Raw compression.
+    """
+    create_table_from_parquet(self.client, unique_database, 'lz4_raw_compressed')
+    self.run_test_case('QueryTest/parquet-lz4-raw-compression', vector, unique_database)
+
 
 # We use various scan range lengths to exercise corner cases in the HDFS scanner more
 # thoroughly. In particular, it will exercise:
@@ -1500,7 +1503,7 @@ class TestTextSplitDelimiters(ImpalaTestSuite):
     options = vector.get_value('exec_option')
     TABLE_NAME = "test_text_split_delimiters"
     qualified_table_name = "%s.%s" % (unique_database, TABLE_NAME)
-    location = get_fs_path("/test-warehouse/%s_%s" % (unique_database, TABLE_NAME))
+    location = get_fs_path("/test-warehouse/%s.db/%s" % (unique_database, TABLE_NAME))
     query = "create table %s (s string) location '%s'" % (qualified_table_name, location)
     self.execute_query(query, options)
 
@@ -1917,6 +1920,11 @@ class TestOrc(ImpalaTestSuite):
                                 % orc_tbl_name)
     assert len(result.data) == 1
     assert '6001215' in result.data
+
+  def test_null_in_inlist(self, vector):
+    """Verifies that Impala does not crash if a NULL is in an IN-list against a string
+    column of an ORC table."""
+    self.run_test_case('QueryTest/null_in_inlist', vector)
 
 
 class TestScannerReservation(ImpalaTestSuite):

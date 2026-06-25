@@ -225,6 +225,20 @@ abstract public class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
         public boolean apply(Expr arg) { return arg instanceof BinaryPredicate; }
       };
 
+  // Returns true if the expression is an equality predicate (= or IN).
+  // Range predicates (<, >, <=, >=, BETWEEN) are NOT equality predicates.
+  public static final com.google.common.base.Predicate<Expr> IS_EQUALITY_PREDICATE =
+      new com.google.common.base.Predicate<Expr>() {
+        @Override
+        public boolean apply(Expr arg) {
+          // TODO: support CompoundPredicate like "p = 1 or p = 2".
+          if (arg instanceof BinaryPredicate) {
+            return !Expr.IS_NOT_EQ_BINARY_PREDICATE.apply(arg);
+          }
+          return arg instanceof InPredicate;
+        }
+      };
+
   public static final com.google.common.base.Predicate<Expr>
     IS_EXPR_EQ_LITERAL_PREDICATE = new com.google.common.base.Predicate<Expr>() {
     @Override
@@ -1193,12 +1207,13 @@ abstract public class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
 
   /**
    * Recursive method that performs the actual substitution for try/substitute() while
-   * removing implicit casts. Resets the analysis state in all non-SlotRef expressions.
-   * Exprs that have non-child exprs which should be affected by substitutions must
-   * override this method and apply the substitution to such exprs as well.
+   * removing implicit casts. The implicit cast removal is in the CastExpr
+   * class which overrides this method. Resets the analysis state in all non-SlotRef
+   * expressions. Exprs that have non-child exprs which should be affected by
+   * substitutions must override this method and apply the substitution to such exprs as
+   * well.
    */
   protected Expr substituteImpl(ExprSubstitutionMap smap, Analyzer analyzer) {
-    if (isImplicitCast()) return getChild(0).substituteImpl(smap, analyzer);
     if (smap != null) {
       Expr substExpr = smap.get(this);
       if (substExpr != null) return substExpr.clone();
@@ -1627,7 +1642,7 @@ abstract public class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
    */
   protected Expr uncheckedCastTo(Type targetType, TypeCompatibility compatibility)
       throws AnalysisException {
-    return new CastExpr(targetType, this, compatibility);
+    return CastExpr.createImplicit(targetType, this, compatibility);
   }
 
   protected Expr uncheckedCastTo(Type targetType) throws AnalysisException {
@@ -1866,15 +1881,23 @@ abstract public class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
 
   public static String getExplainString(
       List<? extends Expr> exprs, TExplainLevel detailLevel) {
+    return getExplainString(exprs, detailLevel, false);
+  }
+
+  public static String getExplainString(
+      List<? extends Expr> exprs, TExplainLevel detailLevel, boolean skipNullElement) {
     if (exprs == null) return "";
     ToSqlOptions toSqlOptions =
         detailLevel.ordinal() >= TExplainLevel.EXTENDED.ordinal() ?
         ToSqlOptions.SHOW_IMPLICIT_CASTS :
         ToSqlOptions.DEFAULT;
     StringBuilder output = new StringBuilder();
+    int outputIdx = 0;
     for (int i = 0; i < exprs.size(); ++i) {
-      if (i > 0) output.append(", ");
+      if (skipNullElement && exprs.get(i) == null) continue;
+      if (outputIdx > 0) output.append(", ");
       output.append(exprs.get(i).toSql(toSqlOptions));
+      ++outputIdx;
     }
     return output.toString();
   }

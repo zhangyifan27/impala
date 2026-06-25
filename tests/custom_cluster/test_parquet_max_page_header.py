@@ -17,8 +17,6 @@
 #
 # Tests for IMPALA-2273
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import os
 import pytest
 import random
@@ -40,19 +38,11 @@ class TestParquetMaxPageHeader(CustomClusterTestSuite):
       pytest.skip('runs only in exhaustive')
     super(TestParquetMaxPageHeader, cls).setup_class()
 
-
   TEXT_TABLE_NAME = "parquet_test_data_text"
   PARQUET_TABLE_NAME = "large_page_header"
   TEXT_DATA_LOCATION = "/test-warehouse/large_page_header_text"
   PARQUET_DATA_LOCATION = "/test-warehouse/large_page_header"
   MAX_STRING_LENGTH = 10*1024*1024
-
-  @classmethod
-  def add_test_dimensions(cls):
-    super(CustomClusterTestSuite, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_constraint(lambda v:
-        v.get_value('table_format').file_format == 'parquet' and
-        v.get_value('table_format').compression_codec == 'none')
 
   def setup_method(self, method):
     super(TestParquetMaxPageHeader, self).setup_method(method)
@@ -62,6 +52,7 @@ class TestParquetMaxPageHeader(CustomClusterTestSuite):
   def teardown_method(self, method):
     self.__drop_test_tbls()
     self.close_impala_clients()
+    super(TestParquetMaxPageHeader, self).teardown_method(method)
 
   def __drop_test_tbls(self):
     self.client.execute("DROP TABLE IF EXISTS %s PURGE" % self.TEXT_TABLE_NAME)
@@ -100,7 +91,7 @@ class TestParquetMaxPageHeader(CustomClusterTestSuite):
   @SkipIfFS.hive
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args("-max_page_header_size=31457280")
-  def test_large_page_header_config(self, vector):
+  def test_large_page_header_config(self):
     # IMPALA-9856: Since this test expect to read a row up to 10 MB in size, we
     # explicitly set 11 MB MAX_ROW_SIZE here so that it can fit in BufferedPlanRootSink.
     self.client.set_configuration_option("max_row_size", "11mb")

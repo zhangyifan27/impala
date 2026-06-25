@@ -94,7 +94,6 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.ValidationException;
-import org.apache.iceberg.mr.Catalogs;
 import org.apache.impala.analysis.AlterTableSortByStmt;
 import org.apache.impala.analysis.FunctionName;
 import org.apache.impala.analysis.KuduPartitionParam;
@@ -115,6 +114,7 @@ import org.apache.impala.catalog.DatabaseNotFoundException;
 import org.apache.impala.catalog.Db;
 import org.apache.impala.catalog.FeCatalogUtils;
 import org.apache.impala.catalog.FileMetadataLoadOpts;
+import org.apache.impala.catalog.iceberg.IcebergCatalogUtil;
 import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.IcebergTableLoadingException;
 import org.apache.impala.catalog.FeFsPartition;
@@ -177,7 +177,9 @@ import org.apache.impala.hive.executor.HiveJavaFunction;
 import org.apache.impala.hive.executor.HiveJavaFunctionFactory;
 import org.apache.impala.thrift.JniCatalogConstants;
 import org.apache.impala.thrift.TAlterDbParams;
+import org.apache.impala.thrift.TAlterDbType;
 import org.apache.impala.thrift.TAlterDbSetOwnerParams;
+import org.apache.impala.thrift.TAlterDbSetDbPropertiesParams;
 import org.apache.impala.thrift.TAlterTableAddColsParams;
 import org.apache.impala.thrift.TAlterTableAddDropRangePartitionParams;
 import org.apache.impala.thrift.TAlterTableAddPartitionParams;
@@ -394,7 +396,7 @@ public class CatalogOpExecutor {
   public static final String CAPABILITIES_KEY = "OBJCAPABILITIES";
 
   // Labels used in catalog timelines
-  private static final String CATALOG_TIMELINE_NAME = "Catalog Server Operation";
+  public static final String CATALOG_TIMELINE_NAME = "Catalog Server Operation";
   private static final String CHECKED_HMS_TABLE_EXISTENCE =
       "Checked table existence in Metastore";
   private static final String CREATED_HMS_TABLE = "Created table in Metastore";
@@ -449,9 +451,14 @@ public class CatalogOpExecutor {
 
   public AuthorizationManager getAuthzManager() { return authzManager_; }
 
+  @VisibleForTesting
   public TDdlExecResponse execDdlRequest(TDdlExecRequest ddlRequest)
       throws ImpalaException {
-    EventSequence catalogTimeline = new EventSequence(CATALOG_TIMELINE_NAME);
+    return execDdlRequest(ddlRequest, new EventSequence(CATALOG_TIMELINE_NAME));
+  }
+
+  public TDdlExecResponse execDdlRequest(TDdlExecRequest ddlRequest,
+      EventSequence catalogTimeline) throws ImpalaException {
     TDdlExecResponse response = new TDdlExecResponse();
     response.setResult(new TCatalogUpdateResult());
     response.getResult().setCatalog_service_id(JniCatalog.getServiceId());
@@ -2341,6 +2348,11 @@ public class CatalogOpExecutor {
     if (params.getComment() != null) {
       db.setDescription(params.getComment());
     }
+    if (params.getProperties() != null) {
+        for (Map.Entry<String, String> property : params.getProperties().entrySet()) {
+          db.putToParameters(property.getKey(), property.getValue());
+        }
+    }
     if (params.getLocation() != null) {
       db.setLocationUri(params.getLocation());
     }
@@ -2724,7 +2736,7 @@ public class CatalogOpExecutor {
         // parameters. If the applyAlterDatabase method below throws an exception,
         // catalog might end up in a inconsistent state. Ideally, we should make a copy
         // of hms Database object and then update the Db once the HMS operation succeeds
-        // similar to what happens in alterDatabaseSetOwner method.
+        // similar to what happens in alterDatabase method.
         if (catalog_.addFunction(fn)) {
           addCatalogServiceIdentifiers(db.getMetaStoreDb(),
               catalog_.getCatalogServiceId(), newCatalogVersion);
@@ -2844,6 +2856,7 @@ public class CatalogOpExecutor {
           IcebergCatalogOpExecutor.addCatalogVersionToTxn(
               iceTxn, catalog_.getCatalogServiceId(), modification.newVersionNumber());
           iceTxn.commitTransaction();
+          catalogTimeline.markEvent("Committed Iceberg transaction");
         } else {
           dropTableStats(table, catalogTimeline);
         }
@@ -3672,6 +3685,7 @@ public class CatalogOpExecutor {
             iceTxn, catalog_.getCatalogServiceId(), modification.newVersionNumber());
       }
       iceTxn.commitTransaction();
+      catalogTimeline.markEvent("Committed Iceberg transaction");
       modification.markInflightEventRegistrationComplete();
       modification.validateInProgressModificationComplete();
     } catch (ImpalaException ex) {
@@ -4637,17 +4651,23 @@ public class CatalogOpExecutor {
       IcebergTable srcIceTable = (IcebergTable) srcTable;
       Map<String, String> tableProperties = Maps
           .newHashMap(srcIceTable.getIcebergApiTable().properties());
-      tableProperties.remove(Catalogs.NAME);
-      tableProperties.remove(Catalogs.LOCATION);
+      tableProperties.remove(IcebergCatalogUtil.CATALOGS_NAME_PROPERTY);
+      tableProperties.remove(IcebergCatalogUtil.CATALOGS_LOCATION_PROPERTY);
       tableProperties.remove(IcebergTable.ICEBERG_CATALOG);
       tableProperties.remove(IcebergTable.ICEBERG_TABLE_IDENTIFIER);
+      // Explicitly preserve the format version, since it is a metadata-level field
+      // in Iceberg and may not be present in iceApiTable.properties().
+      tableProperties.put(TableProperties.FORMAT_VERSION,
+          String.valueOf(srcIceTable.getFormatVersion()));
 
       // The table identifier of the new table will be 'database.table'
       TableIdentifier identifier = IcebergUtil
           .getIcebergTableIdentifier(tbl.getDbName(), tbl.getTableName());
-      if (tbl.getParameters().containsKey(Catalogs.NAME)) {
-        tbl.getParameters().put(Catalogs.NAME, identifier.toString());
-        tableProperties.put(Catalogs.NAME, identifier.toString());
+      if (tbl.getParameters().containsKey(IcebergCatalogUtil.CATALOGS_NAME_PROPERTY)) {
+        tbl.getParameters().put(
+            IcebergCatalogUtil.CATALOGS_NAME_PROPERTY, identifier.toString());
+        tableProperties.put(
+            IcebergCatalogUtil.CATALOGS_NAME_PROPERTY, identifier.toString());
       }
       if (tbl.getParameters().containsKey(IcebergTable.ICEBERG_CATALOG)) {
         tableProperties.put(IcebergTable.ICEBERG_CATALOG,
@@ -4658,8 +4678,10 @@ public class CatalogOpExecutor {
             .put(IcebergTable.ICEBERG_TABLE_IDENTIFIER, identifier.toString());
         tableProperties.put(IcebergTable.ICEBERG_TABLE_IDENTIFIER, identifier.toString());
       }
+      // Use getColumnsInHiveOrder() to exclude hidden V3 row lineage columns
+      // from the schema of the new table.
       List<TColumn> columns = new ArrayList<>();
-      for (Column col: srcIceTable.getColumns()) columns.add(col.toThrift());
+      for (Column col: srcIceTable.getColumnsInHiveOrder()) columns.add(col.toThrift());
       TIcebergPartitionSpec partitionSpec = srcIceTable.getDefaultPartitionSpec()
           .toThrift();
       createIcebergTable(tbl, wantMinimalResult, response, catalogTimeline,
@@ -7374,11 +7396,17 @@ public class CatalogOpExecutor {
     return fsList;
   }
 
+  @VisibleForTesting
   public TResetMetadataResponse execResetMetadata(TResetMetadataRequest req)
       throws CatalogException {
+    return execResetMetadata(req, new EventSequence(CATALOG_TIMELINE_NAME));
+  }
+
+  public TResetMetadataResponse execResetMetadata(TResetMetadataRequest req,
+      EventSequence catalogTimeline) throws CatalogException {
     catalogOpTracker_.increment(req);
     try {
-      TResetMetadataResponse response = execResetMetadataImpl(req);
+      TResetMetadataResponse response = execResetMetadataImpl(req, catalogTimeline);
       catalogOpTracker_.decrement(req, /*errorMsg*/null);
       return response;
     } catch (Exception e) {
@@ -7401,9 +7429,8 @@ public class CatalogOpExecutor {
    * For details on the specific commands see comments on their respective
    * methods in CatalogServiceCatalog.java.
    */
-  public TResetMetadataResponse execResetMetadataImpl(TResetMetadataRequest req)
-      throws CatalogException {
-    EventSequence catalogTimeline = new EventSequence(CATALOG_TIMELINE_NAME);
+  public TResetMetadataResponse execResetMetadataImpl(TResetMetadataRequest req,
+      EventSequence catalogTimeline) throws CatalogException {
     String cmdString = CatalogOpUtil.getShortDescForReset(req);
     TResetMetadataResponse resp = new TResetMetadataResponse();
     resp.setResult(new TCatalogUpdateResult());
@@ -7682,11 +7709,17 @@ public class CatalogOpExecutor {
     }
   }
 
+  @VisibleForTesting
   public TUpdateCatalogResponse updateCatalog(TUpdateCatalogRequest update)
       throws ImpalaException {
+    return updateCatalog(update, new EventSequence(CATALOG_TIMELINE_NAME));
+  }
+
+  public TUpdateCatalogResponse updateCatalog(TUpdateCatalogRequest update,
+      EventSequence catalogTimeline) throws ImpalaException {
     catalogOpTracker_.increment(update);
     try {
-      TUpdateCatalogResponse response = updateCatalogImpl(update);
+      TUpdateCatalogResponse response = updateCatalogImpl(update, catalogTimeline);
       catalogOpTracker_.decrement(update, /*errorMsg*/null);
       return response;
     } catch (Exception e) {
@@ -7705,9 +7738,8 @@ public class CatalogOpExecutor {
    * watch the associated cache directives will be submitted. This will result in an
    * async table refresh once the cache request completes.
    */
-  public TUpdateCatalogResponse updateCatalogImpl(TUpdateCatalogRequest update)
-      throws ImpalaException {
-    EventSequence catalogTimeline = new EventSequence(CATALOG_TIMELINE_NAME);
+  public TUpdateCatalogResponse updateCatalogImpl(TUpdateCatalogRequest update,
+      EventSequence catalogTimeline) throws ImpalaException {
     TUpdateCatalogResponse response = new TUpdateCatalogResponse();
     TUniqueId queryId = update.isSetHeader() && update.header.isSetQuery_id() ?
         update.header.query_id : null;
@@ -8059,6 +8091,7 @@ public class CatalogOpExecutor {
 
       DebugUtils.executeDebugAction(update.getDebug_action(), DebugUtils.ICEBERG_COMMIT);
       iceTxn.commitTransaction();
+      catalogTimeline.markEvent("Committed Iceberg transaction");
     // If we have no information about the success of the commit, we should not delete
     // anything.
     } catch (CommitStateUnknownException u) {
@@ -8454,23 +8487,29 @@ public class CatalogOpExecutor {
     if (db == null) {
       throw new CatalogException("Database: " + dbName + " does not exist.");
     }
+    TAlterDbSetOwnerParams setOwnerParams = null;
+    TAlterDbSetDbPropertiesParams setDbPropertiesParams = null;
     switch (params.getAlter_type()) {
-      case SET_OWNER:
-        alterDatabaseSetOwner(db, params.getSet_owner_params(), wantMinimalResult,
-            response, catalogTimeline);
+      case SET_OWNER: {
+        setOwnerParams = params.getSet_owner_params();
+        Preconditions.checkNotNull(setOwnerParams);
+        Preconditions.checkNotNull(setOwnerParams.owner_name);
+        Preconditions.checkNotNull(setOwnerParams.owner_type);
+        tryLock(db, "altering the owner", catalogTimeline);
         break;
+      }
+      case SET_DBPROPERTIES: {
+        setDbPropertiesParams = params.getSet_dbproperties_params();
+        Preconditions.checkNotNull(setDbPropertiesParams);
+        Preconditions.checkNotNull(setDbPropertiesParams.properties);
+        tryLock(db, "altering dbproperties", catalogTimeline);
+        break;
+      }
       default:
         throw new UnsupportedOperationException(
             "Unknown ALTER DATABASE operation type: " + params.getAlter_type());
     }
-  }
 
-  private void alterDatabaseSetOwner(Db db, TAlterDbSetOwnerParams params,
-      boolean wantMinimalResult, TDdlExecResponse response,
-      EventSequence catalogTimeline) throws ImpalaException {
-    Preconditions.checkNotNull(params.owner_name);
-    Preconditions.checkNotNull(params.owner_type);
-    tryLock(db, "altering the owner", catalogTimeline);
     // Get a new catalog version to assign to the database being altered.
     long newCatalogVersion = catalog_.incrementAndGetCatalogVersion();
     catalog_.getLock().writeLock().unlock();
@@ -8480,16 +8519,27 @@ public class CatalogOpExecutor {
           newCatalogVersion);
       String originalOwnerName = msDb.getOwnerName();
       PrincipalType originalOwnerType = msDb.getOwnerType();
-      msDb.setOwnerName(params.owner_name);
-      msDb.setOwnerType(PrincipalType.valueOf(params.owner_type.name()));
+      switch (params.getAlter_type()) {
+        case SET_OWNER: {
+          msDb.setOwnerName(setOwnerParams.owner_name);
+          msDb.setOwnerType(PrincipalType.valueOf(setOwnerParams.owner_type.name()));
+          break;
+        }
+        case SET_DBPROPERTIES: {
+          for (Map.Entry<String, String> property :
+              setDbPropertiesParams.properties.entrySet())
+            msDb.putToParameters(property.getKey(), property.getValue());
+          break;
+        }
+      }
       try {
         applyAlterDatabase(msDb, catalogTimeline);
       } catch (ImpalaRuntimeException e) {
         throw e;
       }
-      if (authzConfig_.isEnabled()) {
-        authzManager_.updateDatabaseOwnerPrivilege(params.server_name, db.getName(),
-            originalOwnerName, originalOwnerType, msDb.getOwnerName(),
+      if (params.getAlter_type() == TAlterDbType.SET_OWNER && authzConfig_.isEnabled()) {
+        authzManager_.updateDatabaseOwnerPrivilege(setOwnerParams.server_name,
+            db.getName(), originalOwnerName, originalOwnerType, msDb.getOwnerName(),
             msDb.getOwnerType(), response);
       }
       Db updatedDb = catalog_.updateDb(msDb);

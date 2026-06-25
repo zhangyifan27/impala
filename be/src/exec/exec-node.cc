@@ -56,6 +56,7 @@
 #include "exec/tuple-cache-node.h"
 #include "exec/union-node.h"
 #include "exec/unnest-node.h"
+#include "exec/unpivot-node.h"
 #include "exprs/expr.h"
 #include "exprs/scalar-expr-evaluator.h"
 #include "exprs/scalar-expr.h"
@@ -176,10 +177,12 @@ Status PlanNode::CreatePlanNode(
       *node = pool->Add(new HdfsScanPlanNode());
       break;
     case TPlanNodeType::HBASE_SCAN_NODE:
-    case TPlanNodeType::DATA_SOURCE_NODE:
     case TPlanNodeType::KUDU_SCAN_NODE:
     case TPlanNodeType::SYSTEM_TABLE_SCAN_NODE:
       *node = pool->Add(new ScanPlanNode());
+      break;
+    case TPlanNodeType::DATA_SOURCE_NODE:
+      *node = pool->Add(new DataSourceScanPlanNode());
       break;
     case TPlanNodeType::AGGREGATION_NODE:
       *node = pool->Add(new AggregationPlanNode());
@@ -242,6 +245,9 @@ Status PlanNode::CreatePlanNode(
       break;
     case TPlanNodeType::PAIMON_SCAN_NODE:
       *node = pool->Add(new PaimonScanPlanNode());
+      break;
+    case TPlanNodeType::UNPIVOT_NODE:
+      *node = pool->Add(new UnpivotPlanNode());
       break;
     default:
       map<int, const char*>::const_iterator i =

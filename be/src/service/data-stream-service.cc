@@ -21,6 +21,7 @@
 
 #include "common/constant-strings.h"
 #include "common/status.h"
+#include "common/status-serialization.h"
 #include "exec/kudu/kudu-util.h"
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/util/monotime.h"
@@ -56,6 +57,11 @@ DEFINE_int32_hidden(update_filter_min_wait_time_ms, 500,
     "ready.");
 DECLARE_string(debug_actions);
 
+METRIC_DEFINE_histogram(server, datastream_service_incoming_queue_time,
+    "DataStream Service RPC Queue Time", kudu::MetricUnit::kMicroseconds,
+    "Number of microseconds incoming RPC requests spend in the worker queue",
+    kudu::MetricLevel::kInfo, 60000000LU, 3);
+
 namespace impala {
 
 DataStreamService::DataStreamService(MetricGroup* metric_group)
@@ -78,11 +84,14 @@ DataStreamService::DataStreamService(MetricGroup* metric_group)
 Status DataStreamService::Init() {
   int num_svc_threads = FLAGS_datastream_service_num_svc_threads > 0 ?
       FLAGS_datastream_service_num_svc_threads : CpuInfo::num_cores();
+  RpcMgr* rpc_mgr = ExecEnv::GetInstance()->rpc_mgr();
   // The maximum queue length is set to maximum 32-bit value. Its actual capacity is
   // bound by memory consumption against 'mem_tracker_'.
-  RETURN_IF_ERROR(ExecEnv::GetInstance()->rpc_mgr()->RegisterService(num_svc_threads,
-      std::numeric_limits<int32_t>::max(), this, mem_tracker(),
-      ExecEnv::GetInstance()->rpc_metrics()));
+  RETURN_IF_ERROR(rpc_mgr->RegisterService(num_svc_threads,
+      std::numeric_limits<int32_t>::max(),
+      METRIC_datastream_service_incoming_queue_time.Instantiate(
+          rpc_mgr->metric_entity()),
+      this, mem_tracker(), ExecEnv::GetInstance()->rpc_metrics()));
   return Status::OK();
 }
 
@@ -205,7 +214,7 @@ template<typename ResponsePBType>
 void DataStreamService::RespondRpc(const Status& status,
     ResponsePBType* response, kudu::rpc::RpcContext* ctx) {
   MonoDelta duration(MonoTime::Now() - ctx->GetTimeReceived());
-  status.ToProto(response->mutable_status());
+  StatusToProto(status, response->mutable_status());
   response->set_receiver_latency_ns(duration.ToNanoseconds());
   ctx->RespondSuccess();
 }

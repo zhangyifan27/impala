@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import map, range
 import getpass
 import itertools
 import pytest
@@ -35,6 +33,7 @@ from tests.common.impala_connection import (
 from tests.common.impala_test_suite import LOG
 from tests.common.parametrize import UniqueDatabase
 from tests.common.skip import (
+    SkipIfCalcite,
     SkipIfDockerizedCluster,
     SkipIfFS,
     SkipIfHive2,
@@ -47,7 +46,6 @@ from tests.common.test_vector import ImpalaTestDimension
 from tests.util.filesystem_utils import (
     get_fs_path,
     WAREHOUSE,
-    WAREHOUSE_PREFIX,
     IS_HDFS,
     IS_S3,
     IS_ADLS,
@@ -240,6 +238,12 @@ class TestDdlStatements(TestDdlBase):
     comment = self._get_db_comment(unique_database)
     assert '' == comment
 
+    long_comment = 'a' * 4000
+    self.client.execute("comment on database {0} is '{1}'".format(
+        unique_database, long_comment))
+    comment = self._get_db_comment(unique_database)
+    assert long_comment == comment
+
   def test_alter_database_set_owner(self, unique_database):
     self.client.execute("alter database {0} set owner user foo_user".format(
       unique_database))
@@ -266,6 +270,12 @@ class TestDdlStatements(TestDdlBase):
     func_names = self.client.execute("show functions in {0}".format(
       unique_database)).get_data()
     assert "INT\tf()\tNATIVE\ttrue" == func_names
+
+  def test_alter_database_set_db_properties(self, unique_database):
+    self.client.execute("alter database {0} set dbproperties('k'='v')".format(
+      unique_database))
+    properties = self._get_db_properties(unique_database)
+    assert properties['k'] == 'v'
 
   def test_alter_table_set_owner(self, unique_database):
     table_name = "{0}.test_owner_tbl".format(unique_database)
@@ -368,6 +378,11 @@ class TestDdlStatements(TestDdlBase):
     comment = self._get_table_or_view_comment(table)
     assert comment is None
 
+    long_comment = 'a' * 4000
+    self.client.execute("comment on table {0} is '{1}'".format(table, long_comment))
+    comment = self._get_table_or_view_comment(table)
+    assert long_comment == comment
+
   def test_comment_on_view(self, unique_database):
     view = '{0}.comment_view'.format(unique_database)
     self.client.execute("create view {0} as select 1".format(view))
@@ -390,6 +405,11 @@ class TestDdlStatements(TestDdlBase):
     self.client.execute("comment on view {0} is null".format(view))
     comment = self._get_table_or_view_comment(view)
     assert comment is None
+
+    long_comment = 'a' * 4000
+    self.client.execute("comment on view {0} is '{1}'".format(view, long_comment))
+    comment = self._get_table_or_view_comment(view)
+    assert long_comment == comment
 
   def test_comment_on_column(self, unique_database):
     table = "{0}.comment_table".format(unique_database)
@@ -441,6 +461,23 @@ class TestDdlStatements(TestDdlBase):
     self.client.execute("comment on column {0}.i is null".format(view))
     comment = self._get_column_comment(view, 'i')
     assert "" == comment
+
+    long_comment = 'a' * 4000
+    self.client.execute("comment on column {0}.i is '{1}'".format(table, long_comment))
+    comment = self._get_column_comment(table, 'i')
+    assert long_comment == comment
+
+    self.client.execute("comment on column {0}.i is '{1}'".format(view, long_comment))
+    comment = self._get_column_comment(view, 'i')
+    assert long_comment == comment
+
+  def test_create_table_max_column_comment(self, unique_database):
+    long_comment = 'a' * 4000
+    table = '{0}.max_comment_tbl'.format(unique_database)
+    self.client.execute(
+        "create table {0} (i int comment '{1}')".format(table, long_comment))
+    comment = self._get_column_comment(table, 'i')
+    assert long_comment == comment
 
   @UniqueDatabase.parametrize(sync_ddl=True)
   def test_sync_ddl_drop(self, unique_database):
@@ -576,6 +613,7 @@ class TestDdlStatements(TestDdlBase):
       except TimeoutError:
         dump_server_stacktraces()
         assert False, "Timeout in thread run_ddls(%d)" % i
+    pool.terminate()
 
   @SkipIfFS.hbase
   @UniqueDatabase.parametrize(sync_ddl=True)
@@ -622,6 +660,8 @@ class TestDdlStatements(TestDdlBase):
     self.run_test_case('QueryTest/views-ddl', vector, use_db=unique_database,
         multiple_impalad=self._use_multiple_impalad(vector))
 
+  # IMPALA-13176: Calcite does not support broadcast or shuffle hints yet.
+  @SkipIfCalcite.hints_not_supported
   @UniqueDatabase.parametrize()
   def test_view_hints(self, unique_database):
     # Test that plan hints are stored in the view's comment field; this should work

@@ -18,7 +18,6 @@
 package org.apache.impala.calcite.type;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
@@ -387,8 +386,11 @@ public class ImpalaTypeConverter {
       rdt = getRelDataType(Type.SMALLINT);
     } else if (NumericLiteral.fitsInInt(bd)) {
       rdt = getRelDataType(Type.INT);
-    } else {
+    } else if (NumericLiteral.fitsInBigInt(bd)) {
       rdt = getRelDataType(Type.BIGINT);
+    } else {
+      Type impalaType = createImpalaType(Type.DECIMAL, bd.precision(), bd.scale());
+      rdt = createRelDataType(factory, impalaType);
     }
     return factory.createTypeWithNullability(rdt, false);
   }
@@ -434,6 +436,9 @@ public class ImpalaTypeConverter {
     Type retType = ScalarType.getAssignmentCompatibleType(impalaType1, impalaType2,
         TypeCompatibility.DEFAULT);
 
-    return createRelDataType(factory, retType);
+    RelDataType compatibleType = createRelDataType(factory, retType);
+    return (!type1.isNullable() && !type2.isNullable())
+        ? factory.createTypeWithNullability(compatibleType, false)
+        : compatibleType;
   }
 }

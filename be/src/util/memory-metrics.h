@@ -20,10 +20,6 @@
 #include "util/metrics.h"
 
 #include <boost/thread/shared_mutex.hpp>
-#include <gperftools/malloc_extension.h>
-#if defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER)
-#include <sanitizer/allocator_interface.h>
-#endif
 
 #include "gen-cpp/Frontend_types.h"
 
@@ -88,79 +84,6 @@ class AggregateMemoryMetrics {
   static void Refresh();
 };
 
-/// Specialised metric which exposes numeric properties from tcmalloc.
-class TcmallocMetric : public IntGauge {
- public:
-  /// Number of bytes allocated by tcmalloc, currently used by the application.
-  static TcmallocMetric* BYTES_IN_USE;
-
-  /// Number of bytes of system memory reserved by tcmalloc, including that in use by the
-  /// application. Does not include what tcmalloc accounts for as 'malloc metadata' in
-  /// /memz. That is, this is memory reserved by tcmalloc that the application can use.
-  /// Includes unmapped virtual memory.
-  static TcmallocMetric* TOTAL_BYTES_RESERVED;
-
-  /// Number of bytes reserved and still mapped by tcmalloc that are not allocated to the
-  /// application.
-  static TcmallocMetric* PAGEHEAP_FREE_BYTES;
-
-  /// Number of bytes once reserved by tcmalloc, but released back to the operating system
-  /// so that their use incurs a pagefault. Contributes to the total amount of virtual
-  /// address space used, but not to the physical memory usage.
-  static TcmallocMetric* PAGEHEAP_UNMAPPED_BYTES;
-
-  /// Derived metric computing the amount of physical memory (in bytes) used by the
-  /// process, including that actually in use and free bytes reserved by tcmalloc. Does not
-  /// include the tcmalloc metadata.
-  class PhysicalBytesMetric : public IntGauge {
-   public:
-    PhysicalBytesMetric(const TMetricDef& def) : IntGauge(def, 0) { }
-
-    virtual int64_t GetValue() override {
-      return TOTAL_BYTES_RESERVED->GetValue() - PAGEHEAP_UNMAPPED_BYTES->GetValue();
-    }
-  };
-
-  static PhysicalBytesMetric* PHYSICAL_BYTES_RESERVED;
-
-  static TcmallocMetric* CreateAndRegister(MetricGroup* metrics, const std::string& key,
-      const std::string& tcmalloc_var);
-
-  virtual int64_t GetValue() override {
-    int64_t retval = 0;
-#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
-    MallocExtension::instance()->GetNumericProperty(tcmalloc_var_.c_str(),
-        reinterpret_cast<size_t*>(&retval));
-#endif
-    return retval;
-  }
-
- private:
-  /// Name of the tcmalloc property this metric should fetch.
-  const std::string tcmalloc_var_;
-
-  TcmallocMetric(const TMetricDef& def, const std::string& tcmalloc_var)
-    : IntGauge(def, 0), tcmalloc_var_(tcmalloc_var) { }
-};
-
-/// Alternative to TCMallocMetric if we're running under a sanitizer that replaces
-/// malloc(), e.g. address or thread sanitizer.
-class SanitizerMallocMetric : public IntGauge {
- public:
-  SanitizerMallocMetric(const TMetricDef& def) : IntGauge(def, 0) {}
-
-  static SanitizerMallocMetric* BYTES_ALLOCATED;
-
-  virtual int64_t GetValue() override {
-#if defined(ADDRESS_SANITIZER) || defined(THREAD_SANITIZER)
-    return __sanitizer_get_current_allocated_bytes();
-#else
-    return 0;
-#endif
-
-  }
-};
-
 // A singleton for caching the gathering of JVM Metrics for 1 second, to amortize
 // the cost of getting all the JVM metrics.
 //
@@ -215,7 +138,7 @@ class JvmMemoryMetric : public IntGauge {
 
   /// Searches through jvm_metrics_response_ for a matching memory pool and pulls out the
   /// right value from that structure according to metric_type_.
-  virtual int64_t GetValue() override;
+  int64_t GetValue() override;
 
   // Expose the total memory metrics that may be counted against process memory limit.
   // Initialised by InitMetrics().
@@ -249,7 +172,7 @@ class JvmMemoryMetric : public IntGauge {
 // data via JniUtil::GetJvmMemoryMetrics() via JvmMetricCache.
 class JvmMemoryCounterMetric : public IntCounter {
   public:
-    virtual int64_t GetValue() override;
+    int64_t GetValue() override;
 
     static JvmMemoryCounterMetric* GC_COUNT;
     static JvmMemoryCounterMetric* GC_TIME_MILLIS;
@@ -286,7 +209,7 @@ class BufferPoolMetric : public IntGauge {
   static BufferPoolMetric* NUM_CLEAN_PAGES;
   static BufferPoolMetric* CLEAN_PAGE_BYTES;
 
-  virtual int64_t GetValue() override;
+  int64_t GetValue() override;
 
  private:
   friend class ReservationTrackerTest;
@@ -326,7 +249,7 @@ class MemTrackerMetric : public IntGauge {
   static void CreateMetrics(MetricGroup* metrics, MemTracker* mem_tracker,
       const std::string& name);
 
-  virtual int64_t GetValue() override;
+  int64_t GetValue() override;
 
  private:
   enum class MemTrackerMetricType {
@@ -341,7 +264,7 @@ class MemTrackerMetric : public IntGauge {
   const MemTracker* mem_tracker_;
 };
 
-/// Registers common tcmalloc memory metrics. If 'register_jvm_metrics' is true, the JVM
+/// Registers common malloc memory metrics. If 'register_jvm_metrics' is true, the JVM
 /// memory metrics are also registered. If 'global_reservations' and 'buffer_pool' are
 /// not NULL, also register buffer pool metrics.
 Status RegisterMemoryMetrics(MetricGroup* metrics, bool register_jvm_metrics,

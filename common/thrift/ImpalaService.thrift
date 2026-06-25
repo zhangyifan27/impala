@@ -1025,7 +1025,7 @@ enum TImpalaQueryOptions {
   MEM_ESTIMATE_SCALE_FOR_SPILLING_OPERATOR = 190
 
   // If True, use the Calcite planner for compilation
-  USE_CALCITE_PLANNER = 191
+  USE_CALCITE_PLANNER = 191 // Removed
 
   // The default format for reading JSON binary columns, can be overridden by table
   // property 'json.binary.format' (if set). The valid values are:
@@ -1073,6 +1073,32 @@ enum TImpalaQueryOptions {
   // Maximum number of partitions to show in SHOW CREATE TABLE WITH STATS.
   // 0 means no limit. Default is 1000.
   SHOW_CREATE_TABLE_PARTITION_LIMIT = 198
+
+  // Planner to use for compiling query. Choices are:
+  // ORIGINAL         : use Original planner
+  // CALCITE          : use Calcite planner
+  // default is ORIGINAL
+  PLANNER = 199
+
+  // Planner to use for fallback if chosen planner fails at compilation time.
+  // If the planner and fallback_planner are the same, there will be no fallback.
+  // Choices are:
+  // ORIGINAL         : use Original planner
+  // CALCITE          : use Calcite planner
+  // NONE             : No fallback planner to be used.
+  // default is ORIGINAL
+  FALLBACK_PLANNER = 200
+
+  // Enables the display of the CALCITE plan in the EXPLAIN output.
+  // The flag has no effect when CALCITE is not in use.
+  // default is false
+  ENABLE_EXPLAIN_CALCITE = 201
+
+  // When true, try to use historical execution stats in query planning.
+  USE_HBO_STATS = 202
+
+  // When true, store historical execution stats asynchronously after the query finishes.
+  STORE_HBO_STATS = 203
 }
 
 // The summary of a DML statement.

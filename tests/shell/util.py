@@ -17,7 +17,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from contextlib import closing
 import logging
 import os
@@ -43,7 +42,7 @@ from tests.common.impala_test_suite import (
     STRICT_HS2_HOST_PORT,
     STRICT_HS2_HTTP_HOST_PORT,
 )
-from tests.common.test_vector import ImpalaTestDimension
+from tests.common.test_vector import BEESWAX, HS2, HS2_HTTP, ImpalaTestDimension, PROTOCOL
 
 LOG = logging.getLogger('tests/shell/util.py')
 LOG.addHandler(logging.StreamHandler())
@@ -163,20 +162,20 @@ def run_impala_shell_cmd_no_expect(vector, shell_args, env=None, stdin_input=Non
 
 def get_impalad_host_port(vector):
   """Get host and port to connect to based on test vector provided."""
-  protocol = vector.get_value("protocol")
+  protocol = vector.get_value(PROTOCOL)
   strict = vector.get_value_with_default("strict_hs2_protocol", False)
-  if protocol == 'hs2':
+  if protocol == HS2:
     if strict:
       return STRICT_HS2_HOST_PORT
     else:
       return IMPALAD_HS2_HOST_PORT
-  elif protocol == 'hs2-http':
+  elif protocol == HS2_HTTP:
     if strict:
       return STRICT_HS2_HTTP_HOST_PORT
     else:
       return IMPALAD_HS2_HTTP_HOST_PORT
   else:
-    assert protocol == 'beeswax', protocol
+    assert protocol == BEESWAX, protocol
     return IMPALAD_BEESWAX_HOST_PORT
 
 
@@ -190,7 +189,7 @@ def get_shell_cmd(vector):
   Returns the command as a list of string arguments."""
   impala_shell_executable = get_impala_shell_executable(vector)
   if vector.get_value_with_default("strict_hs2_protocol", False):
-    protocol = vector.get_value("protocol")
+    protocol = vector.get_value(PROTOCOL)
     return impala_shell_executable + [
             "--protocol={0}".format(protocol),
             "--strict_hs2_protocol",
@@ -209,11 +208,11 @@ def spawn_shell(shell_cmd):
 
 def get_open_sessions_metric(vector):
   """Get the name of the vector that tracks open sessions for the protocol in vector."""
-  protocol = vector.get_value("protocol")
-  if protocol in ('hs2', 'hs2-http'):
+  protocol = vector.get_value(PROTOCOL)
+  if protocol in (HS2, HS2_HTTP):
     return 'impala-server.num-open-hiveserver2-sessions'
   else:
-    assert protocol == 'beeswax', protocol
+    assert protocol == BEESWAX, protocol
     return 'impala-server.num-open-beeswax-sessions'
 
 
@@ -378,14 +377,9 @@ def get_dev_impala_shell_executable():
 def create_impala_shell_executable_dimension(dev_only=False):
   _, include_pypi = get_dev_impala_shell_executable()
   dimensions = []
-  python3_pytest = (os.getenv("IMPALA_USE_PYTHON3_TESTS", "true") == "true")
   assert os.getenv("IMPALA_SYSTEM_PYTHON3"), "Must set env var IMPALA_SYSTEM_PYTHON3!"
   dimensions.append('dev3')
-  if os.getenv("IMPALA_SYSTEM_PYTHON2") and not python3_pytest:
-    dimensions.append('dev')
   if include_pypi and not dev_only:
-    if os.getenv("IMPALA_SYSTEM_PYTHON2") and not python3_pytest:
-      dimensions.append('python2')
     if os.getenv("IMPALA_SYSTEM_PYTHON3"):
       dimensions.append('python3')
   return ImpalaTestDimension('impala_shell', *dimensions)
@@ -396,11 +390,8 @@ def get_impala_shell_executable(vector):
   # use 'dev3' as the default.
   impala_shell_executable, _ = get_dev_impala_shell_executable()
   executable_map = {
-    'dev': ['env', 'IMPALA_PYTHON_EXECUTABLE=python',
-            'IMPALA_SHELL_PYTHON_FALLBACK=false', impala_shell_executable],
     'dev3': ['env', 'IMPALA_PYTHON_EXECUTABLE=python3',
              'IMPALA_SHELL_PYTHON_FALLBACK=false', impala_shell_executable],
-    'python2': [os.path.join(IMPALA_HOME, 'shell/build/python2_venv/bin/impala-shell')],
     'python3': [os.path.join(IMPALA_HOME, 'shell/build/python3_venv/bin/impala-shell')]
   }
   return executable_map[vector.get_value_with_default('impala_shell', 'dev3')]

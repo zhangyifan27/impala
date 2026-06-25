@@ -44,14 +44,12 @@ import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.impala.analysis.Path.PathType;
 import org.apache.impala.analysis.StmtMetadataLoader.StmtTableCache;
-import org.apache.impala.authorization.AuthorizationChecker;
 import org.apache.impala.authorization.AuthorizationConfig;
 import org.apache.impala.authorization.AuthorizationContext;
 import org.apache.impala.authorization.AuthorizationFactory;
 import org.apache.impala.authorization.Privilege;
 import org.apache.impala.authorization.PrivilegeRequest;
 import org.apache.impala.authorization.PrivilegeRequestBuilder;
-import org.apache.impala.authorization.TableMask;
 import org.apache.impala.authorization.User;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.DatabaseNotFoundException;
@@ -68,7 +66,6 @@ import org.apache.impala.catalog.FeTable;
 import org.apache.impala.catalog.FeView;
 import org.apache.impala.catalog.IcebergTimeTravelTable;
 import org.apache.impala.catalog.KuduTable;
-import org.apache.impala.catalog.MaterializedViewHdfsTable;
 import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.catalog.StructField;
 import org.apache.impala.catalog.StructType;
@@ -104,6 +101,7 @@ import org.apache.impala.rewrite.ExprRewriter;
 import org.apache.impala.rewrite.ExtractCommonConjunctRule;
 import org.apache.impala.rewrite.ExtractCompoundVerticalBarExprRule;
 import org.apache.impala.rewrite.FoldConstantsRule;
+import org.apache.impala.rewrite.IcebergVirtualColumnRewriteRule;
 import org.apache.impala.rewrite.NormalizeBinaryPredicatesRule;
 import org.apache.impala.rewrite.NormalizeCountStarRule;
 import org.apache.impala.rewrite.NormalizeExprsRule;
@@ -644,6 +642,9 @@ public class Analyzer {
     // which is the maximum memory limit of destination request pool for this query in
     // bytes. Value 0 or less means unknown.
     private long poolMaxMemLimit_ = -1;
+    // Value of impala.admission-control.max-mem-resources.<pool_name>,
+    // which is the total memory cap for the pool across all backends, in bytes.
+    private long poolMaxMemResources_ = -1;
 
     // Cache of KuduTables opened for this query. (map from table name to kudu table)
     // This cache prevent multiple openTable calls for a given table in the same query.
@@ -676,6 +677,8 @@ public class Analyzer {
       // expr rewrites can be disabled via a query option. When rewrites are enabled
       // BetweenPredicates should be rewritten first to help trigger other rules.
       rules.add(BetweenToCompoundRule.INSTANCE);
+      // Iceberg V3 syntactic-sugar virtual columns must be rewritten before planning.
+      rules.add(IcebergVirtualColumnRewriteRule.INSTANCE);
       // Binary predicates must be rewritten to a canonical form for both Kudu predicate
       // pushdown and Parquet row group pruning based on min/max statistics.
       rules.add(NormalizeBinaryPredicatesRule.INSTANCE);
@@ -799,6 +802,11 @@ public class Analyzer {
       // No MEM_LIMIT* option is set and max-query-mem-limit is set.
       // Return the max-query-mem-limit regardless of clamp-mem-limit-query-option value.
       return globalState_.poolMaxMemLimit_;
+    } else if (globalState_.poolMaxMemResources_ > 0) {
+      // No MEM_LIMIT* option is set and max-query-mem-limit is not set, but
+      // max-mem-resources is set. So return the maximum memory that can be admitted to
+      // this pool per executor.
+      return globalState_.poolMaxMemResources_ / Math.max(numExecutorsForPlanning(), 1);
     } else if (opts.isSetMax_mem_estimate_for_admission()
         && opts.getMax_mem_estimate_for_admission() > 0) {
       // MAX_MEM_ESTIMATE_FOR_ADMISSION
@@ -828,6 +836,9 @@ public class Analyzer {
       }
       if (poolConfig.isSetMax_query_mem_limit()) {
         globalState_.poolMaxMemLimit_ = poolConfig.getMax_query_mem_limit();
+      }
+      if (poolConfig.isSetMax_mem_resources() && poolConfig.getMax_mem_resources() > 0) {
+        globalState_.poolMaxMemResources_ = poolConfig.getMax_mem_resources();
       }
     }
   }
@@ -1059,6 +1070,7 @@ public class Analyzer {
 
     // Delegate creation of the tuple descriptor to the concrete table ref.
     TupleDescriptor result = ref.createTupleDescriptor(this);
+    result.setTableRef(ref);
     result.setAliases(aliases, ref.hasExplicitAlias());
     // Register all legal aliases.
     for (String alias: aliases) {
@@ -1180,88 +1192,16 @@ public class Analyzer {
     }
   }
 
-  /**
-   * Resolves column-masking/row-filtering policies on the given table. Returns a table
-   * masking view if any of these policies exist. The TableRef should be resolved first
-   * so we know the target table/view/collection.
-   *
-   * @param resolvedTableRef A resolved TableRef for table masking
-   */
-  public TableRef resolveTableMask(TableRef resolvedTableRef) throws AnalysisException {
-    Preconditions.checkState(resolvedTableRef.isResolved(), "Table should be resolved");
-    // Only do table masking when authorization is enabled and the authorization
-    // factory supports column-masking/row-filtering. If both of these are false,
-    // return the unmasked table ref.
-    if (!getAuthzFactory().getAuthorizationConfig().isEnabled()
-        || !getAuthzFactory().supportsTableMasking()) {
-      return resolvedTableRef;
-    }
-    // Performing table masking.
-    AuthorizationChecker authChecker = getAuthzFactory().newAuthorizationChecker(
-        getCatalog().getAuthPolicy());
-    String dbName;
-    String tblName;
-    if (resolvedTableRef instanceof InlineViewRef) {
-      FeView view = ((InlineViewRef) resolvedTableRef).getView();
-      dbName = view.getDb().getName();
-      tblName = view.getName();
-    } else if (resolvedTableRef instanceof CollectionTableRef
-        && resolvedTableRef.isRelative()) {
-       // Relative table refs don't need masking. Its base table will be masked.
-       return resolvedTableRef;
-    } else {
-      dbName = resolvedTableRef.getTable().getDb().getName();
-      tblName = resolvedTableRef.getTable().getName();
-    }
-    // The selected columns should be in the same relative order as they are in the
-    // corresponding Hive table so that the order of the SelectListItem's in the
-    // table mask view (if needs masking or filtering) would be correct.
-    List<Column> columns = resolvedTableRef.getSelectedColumnsInHiveOrder();
-    TableMask tableMask = new TableMask(authChecker, dbName, tblName, columns, user_);
-    try {
-      if (resolvedTableRef instanceof CollectionTableRef) {
-        if (tableMask.needsRowFiltering()) {
-          // The table ref is a non-relative CollectionTableRef, e.g. the table ref in
-          // "select item from functional_parquet.complextypestbl.int_array". We can't
-          // replace "complextypestbl" with a table masking view here.
-          // TODO: Support this in IMPALA-10484 by rewriting it to relative ref, e.g.
-          //  select a.item from functional_parquet.complextypestbl t, t.int_array a;
-          throw new AnalysisException(String.format("Using non-relative collection " +
-              "column %s of table %s.%s is not supported since there are row-filtering " +
-              "policies on this table (IMPALA-10484). Rewrite query to use relative " +
-              "reference.",
-              String.join(".", resolvedTableRef.getResolvedPath().getRawPath()),
-              dbName, tblName));
-        }
-      } else if (!(resolvedTableRef instanceof InlineViewRef) &&
-          resolvedTableRef.getTable() instanceof MaterializedViewHdfsTable &&
-          ((MaterializedViewHdfsTable) resolvedTableRef.getTable())
-            .isReferencesMaskedTables(authChecker, getCatalog(), getUser())) {
-        // If a materialized view definition references tables that have table masking
-        // policies defined, we set a flag indicating that this is an authorization
-        // exception instead of throwing an AnalysisException here. Later, during the
-        // AnalysisContext.analyzeAndAuthorize() we throw the AuthorizationException.
-        mvAuthExceptionMsg_ = String.format("Materialized view %s.%s " +
-            "references tables with column masking or " +
-            "row filtering policies.", dbName, tblName);
-      } else if (tableMask.needsMaskingOrFiltering()) {
-        return InlineViewRef.createTableMaskView(resolvedTableRef, tableMask,
-            getAuthzCtx());
-      }
-      return resolvedTableRef;
-    } catch (InternalException e) {
-      String msg = "Error resolving table mask on " + dbName + "." + tblName;
-      LOG.error(msg, e);
-      throw new AnalysisException(msg, e);
-    }
-  }
-
   public boolean encounteredMVAuthException() {
     return mvAuthExceptionMsg_ != null;
   }
 
   public String getMVAuthExceptionMsg() {
     return mvAuthExceptionMsg_;
+  }
+
+  public void setMVAuthExceptionMsg(String message) {
+    mvAuthExceptionMsg_ = message;
   }
 
   public void setTotalRecordsNumV1(long totalRecordsNumV1) {
@@ -1773,6 +1713,7 @@ public class Analyzer {
   public SlotDescriptor registerSlotRef(Path slotPath,
       boolean duplicateIfCollections) throws AnalysisException {
     Preconditions.checkState(slotPath.isRootedAtTuple());
+    SlotDescriptor result = null;
     // If 'tupleStack_' is empty then this is a top level call to this function (not a
     // recursive call) and we push the root TupleDescriptor to 'tupleStack_'.
     try (TupleStackGuard guard = tupleStack_.isEmpty()
@@ -1794,8 +1735,14 @@ public class Analyzer {
       List<String> key = slotPath.getFullyQualifiedRawPath();
       Preconditions.checkState(key.stream().allMatch(s -> s.equals(s.toLowerCase())),
           "Slot paths should be lower case: " + key);
-      return createAndRegisterSlotDesc(slotPath);
+      result = createAndRegisterSlotDesc(slotPath);
     }
+    TableRef tableRef = tableRefMap_.get(result.getParent().getId());
+    if (tableRef instanceof UnpivotTableRef || tableRef instanceof PivotTableRef) {
+      Preconditions.checkState(tupleStack_.isEmpty());
+      tableRef.notifySlotRefRegistered(this, result);
+    }
+    return result;
   }
 
   // It is possible that another Analyzer, for example a child Analyzer in an inline view,
@@ -3534,14 +3481,30 @@ public class Analyzer {
       Preconditions.checkState(e.isAnalyzed());
       e.getIds(null, slotIds);
     }
-    return globalState_.descTbl.markSlotsMaterialized(slotIds);
+    Set<TupleDescriptor> result = globalState_.descTbl.markSlotsMaterialized(slotIds);
+    for (TupleDescriptor tupleDesc : result) {
+      TableRef tableRef = tupleDesc.getTableRef();
+      if (tableRef instanceof UnpivotTableRef) {
+        for (Expr expr : exprs) {
+          tableRef.notifySlotsMaterialized(this, expr);
+        }
+      }
+    }
+    return result;
   }
 
   public Set<TupleDescriptor> materializeSlots(Expr e) {
     List<SlotId> slotIds = new ArrayList<>();
     Preconditions.checkState(e.isAnalyzed());
     e.getIds(null, slotIds);
-    return globalState_.descTbl.markSlotsMaterialized(slotIds);
+    Set<TupleDescriptor> result = globalState_.descTbl.markSlotsMaterialized(slotIds);
+    for (TupleDescriptor tupleDesc : result) {
+      TableRef tableRef = tupleDesc.getTableRef();
+      if (tableRef instanceof UnpivotTableRef) {
+        tableRef.notifySlotsMaterialized(this, e);
+      }
+    }
+    return result;
   }
 
   /**
@@ -4380,6 +4343,12 @@ public class Analyzer {
    * Return true if the result can have null values when apply e on tupleIds
    */
   private boolean isNullableConjunct(Expr e, List<TupleId> tupleIds) {
+    // Push NOT inward (i.e. applying De Morgan's law) so that e.g.
+    // "NOT (t1.v1 IS NULL OR t2.v2 IS NULL)" becomes
+    // "t1.v1 IS NOT NULL AND t2.v2 IS NOT NULL".
+    // Conversely, "NOT (t1.v1 = 1 AND t2.v2 = 2)" becomes "t1.v1 != 1 OR t2.v2 != 2".
+    // This is required for proper nullability analysis of complex predicates.
+    e = Expr.pushNegationToOperands(e);
     // A clause like "t1.v1 IS NOT NULL OR t2.v2 IS NOT NULL" and t1 in 'tupleIds' does
     // not prove that t1.v1 can't be NULL, because when t2.v2 IS NOT NULL, t1.v1 can be
     // null. But a clause like "t1.v1 IS NOT NULL OR t1.v2 IS NOT NULL" proves that the

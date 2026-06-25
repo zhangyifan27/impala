@@ -47,7 +47,6 @@ import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.PrintUtils;
 import org.apache.impala.common.RuntimeEnv;
 import org.apache.impala.service.BackendConfig;
-import org.apache.impala.service.CatalogOpExecutor;
 import org.apache.impala.service.FrontendProfile;
 import org.apache.impala.thrift.TComputeStatsParams;
 import org.apache.impala.thrift.TErrorCode;
@@ -56,7 +55,8 @@ import org.apache.impala.thrift.TPartitionStats;
 import org.apache.impala.thrift.TTableName;
 import org.apache.impala.thrift.TUnit;
 import org.apache.impala.util.MetaStoreUtil;
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -113,7 +113,7 @@ import com.google.common.collect.Sets;
  * TODO: Compute stats on complex types.
  */
 public class ComputeStatsStmt extends StatementBase implements SingleTableStmt {
-  private static final Logger LOG = Logger.getLogger(ComputeStatsStmt.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ComputeStatsStmt.class);
 
   private static String AVRO_SCHEMA_MSG_PREFIX = "Cannot COMPUTE STATS on Avro table " +
       "'%s' because its column definitions do not match those in the Avro schema.";
@@ -436,6 +436,10 @@ public class ComputeStatsStmt extends StatementBase implements SingleTableStmt {
         if (col == null) {
           throw new AnalysisException(colName + " not found in table: " +
               table_.getName());
+        }
+        if (col.isHidden()) {
+          throw new AnalysisException("COMPUTE STATS not supported for hidden column " +
+              col.getName() + " of table " + table_.getName());
         }
         if (table_ instanceof FeFsTable && table_.isClusteringColumn(col)) {
           throw new AnalysisException("COMPUTE STATS not supported for partitioning " +
@@ -957,7 +961,7 @@ public class ComputeStatsStmt extends StatementBase implements SingleTableStmt {
    */
   private boolean ignoreColumn(Column c) {
     Type t = c.getType();
-    return !t.isValid() || !t.isSupported() || t.isComplexType();
+    return !t.isValid() || !t.isSupported() || t.isComplexType() || c.isHidden();
   }
 
   public double getEffectiveSamplingPerc() { return effectiveSamplePerc_; }

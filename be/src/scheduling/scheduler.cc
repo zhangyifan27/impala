@@ -170,6 +170,9 @@ Status Scheduler::GenerateScanRanges(const vector<TFileSplitGeneratorSpec>& spec
       if (spec.file_desc.__isset.file_metadata) {
         scan_range.__set_file_metadata(spec.file_desc.file_metadata);
       }
+      if (spec.__isset.iceberg_deletion_vector) {
+        scan_range.__set_iceberg_deletion_vector(spec.iceberg_deletion_vector);
+      }
       TScanRangeLocationList scan_range_list;
       scan_range_list.__set_scan_range(scan_range);
 
@@ -309,10 +312,11 @@ Status Scheduler::ComputeScanRangeAssignment(
       }
       DCHECK(locations != nullptr);
       RETURN_IF_ERROR(
-          ComputeScanRangeAssignment(executor_config, node_id, node_replica_preference,
-              node_random_replica, *locations, exec_request.host_list, exec_at_coord,
-              state->query_options(), total_assignment_timer, state->rng(),
-              state->summary_profile(), assignment));
+          ComputeScanRangeAssignment(executor_config, node_id, fragment.idx,
+              node_replica_preference, node_random_replica, *locations,
+              exec_request.host_list, exec_at_coord, state->query_options(),
+              total_assignment_timer, state->rng(), state->summary_profile(),
+              assignment));
       state->IncNumScanRanges(locations->size());
     }
   }
@@ -600,6 +604,15 @@ Status Scheduler::ComputeFragmentExecParams(const ExecutorConfig& executor_confi
       host = coord_desc.address();
       DCHECK(coord_desc.has_krpc_address());
       krpc_host = coord_desc.krpc_address();
+    } else if (!fragment_state->scan_range_assignment.empty() &&
+        ContainsDataSourceScanNode(fragment.plan)) {
+      // JDBC virtual scan ranges are pinned to a single executor. Schedule this
+      // fragment there so DataSourceScanNode instances receive their ranges.
+      DCHECK_EQ(fragment_state->scan_range_assignment.size(), 1)
+          << "Expected single-host JDBC scan assignment for fragment "
+          << fragment.display_name;
+      host = fragment_state->scan_range_assignment.begin()->first;
+      krpc_host = LookUpKrpcHost(executor_config, host);
     } else if (fragment_state->exchange_input_fragments.size() > 0) {
       // Interior unpartitioned fragments can be scheduled on an arbitrary executor.
       // Pick a random instance from the first input fragment.
@@ -858,6 +871,21 @@ void Scheduler::CreateCollocatedAndScanInstances(const ExecutorConfig& executor_
     max_num_instances = max(1, request_query_option.mt_dop);
   }
 
+  // JDBC fragments must run only on the executor holding their virtual scan ranges.
+  // Otherwise instances on other hosts execute every DataSourceScanNode in a collocated
+  // UnionNode without assigned ranges and produce no rows.
+  if (fragment_state->scan_range_assignment.size() == 1 &&
+      ContainsDataSourceScanNode(fragment.plan)) {
+    const NetworkAddressPB& data_source_host =
+        fragment_state->scan_range_assignment.begin()->first;
+    int max_instances = max_num_instances;
+    for (const auto& entry : instances_per_host) {
+      max_instances = max(max_instances, entry.second);
+    }
+    instances_per_host.clear();
+    instances_per_host[data_source_host] = max_instances;
+  }
+
   // Track the index of the next instance to be created for this fragment.
   int per_fragment_instance_idx = 0;
   for (const auto& entry : instances_per_host) {
@@ -1086,8 +1114,9 @@ void Scheduler::CreateCollocatedJoinBuildInstances(
 }
 
 Status Scheduler::ComputeScanRangeAssignment(const ExecutorConfig& executor_config,
-    PlanNodeId node_id, const TReplicaPreference::type* node_replica_preference,
-    bool node_random_replica, const vector<TScanRangeLocationList>& locations,
+    PlanNodeId node_id, TFragmentIdx fragment_idx,
+    const TReplicaPreference::type* node_replica_preference, bool node_random_replica,
+    const vector<TScanRangeLocationList>& locations,
     const vector<TNetworkAddress>& host_list, bool exec_at_coord,
     const TQueryOptions& query_options, RuntimeProfile::Counter* timer, std::mt19937* rng,
     RuntimeProfile* summary_profile, FragmentScanRangeAssignment* assignment) {
@@ -1128,13 +1157,47 @@ Status Scheduler::ComputeScanRangeAssignment(const ExecutorConfig& executor_conf
   // Holds scan ranges that must be assigned for remote reads.
   vector<const TScanRangeLocationList*> remote_scan_range_locations;
 
+  // For JDBC data source scans: all virtual split ranges for this scan node must land on
+  // the same executor. All JDBC scan nodes within the same fragment must share that
+  // executor so that a collocated UnionNode does not run on multiple hosts, where each
+  // host would otherwise execute every DataSourceScanNode child and read the full table.
+  bool jdbc_executor_selected = false;
+  BackendDescriptorPB jdbc_executor;
+
   // Loop over all scan ranges, select an executor for those with local impalads and
   // collect all others for later processing.
   for (const TScanRangeLocationList& scan_range_locations : locations) {
     TReplicaPreference::type min_distance = TReplicaPreference::REMOTE;
 
     // Select executor for the current scan range.
-    if (exec_at_coord) {
+    if (scan_range_locations.scan_range.__isset.is_data_source_scan &&
+        scan_range_locations.scan_range.is_data_source_scan) {
+      // All JDBC virtual scan ranges go to one executor so that a single shared JDBC
+      // connection can serve all N DataSourceScanNode instances in the same fragment.
+      // Select one executor on the first JDBC range and reuse it for the rest.
+      // Check this before exec_at_coord. UNPARTITIONED fragments set exec_at_coord=true,
+      // and the exec_at_coord path always assigns to the coordinator. In a distributed
+      // cluster that would pin JDBC ranges on the coordinator while fragment instances
+      // may run on executors. When NumExecutors()==0 (e.g. NUM_NODES=1), the branch
+      // below falls back to coord_desc, same as exec_at_coord would.
+      if (!jdbc_executor_selected) {
+        jdbc_executor_selected = true;
+        if (executor_config.group.NumExecutors() > 0) {
+          vector<BackendDescriptorPB> all_execs =
+              executor_config.group.GetAllExecutorDescriptors();
+          // Hash fragment_idx so every JDBC scan node in the same fragment is pinned to
+          // the same executor. Different fragments (e.g. build/probe sides of a join) may
+          // still spread across executors.
+          size_t idx = std::hash<int>{}(fragment_idx) % all_execs.size();
+          jdbc_executor = all_execs[idx];
+        } else {
+          // No executors available (coordinator-only mode): fall back to coordinator.
+          jdbc_executor = coord_desc;
+        }
+      }
+      assignment_ctx.RecordScanRangeAssignment(
+          jdbc_executor, node_id, host_list, scan_range_locations, assignment);
+    } else if (exec_at_coord) {
       DCHECK(assignment_ctx.executor_group().LookUpExecutorIp(
           coord_desc.address().hostname(), nullptr));
       assignment_ctx.RecordScanRangeAssignment(
@@ -1282,6 +1345,10 @@ bool Scheduler::ContainsNode(
 
 bool Scheduler::ContainsScanNode(const TPlan& plan) {
   return ContainsNode(plan, SCAN_NODE_TYPES);
+}
+
+bool Scheduler::ContainsDataSourceScanNode(const TPlan& plan) {
+  return ContainsNode(plan, TPlanNodeType::DATA_SOURCE_NODE);
 }
 
 bool Scheduler::ContainsUnionNode(const TPlan& plan) {
@@ -1498,6 +1565,7 @@ void Scheduler::ComputeBackendExecParams(
     *backend.second.exec_params->mutable_backend_id() = be_desc.backend_id();
     *backend.second.exec_params->mutable_address() = be_desc.address();
     *backend.second.exec_params->mutable_krpc_address() = be_desc.krpc_address();
+    *backend.second.exec_params->mutable_machine_info() = be_desc.machine_info();
     if (!backend.second.exec_params->is_coord_backend()) {
       largest_min_reservation = max(largest_min_reservation,
           backend.second.exec_params->min_mem_reservation_bytes());
@@ -1727,6 +1795,9 @@ void TScanRangeToScanRangePB(const TScanRange& tscan_range, ScanRangePB* scan_ra
   }
   if (tscan_range.__isset.is_system_scan) {
     scan_range_pb->set_is_system_scan(tscan_range.is_system_scan);
+  }
+  if (tscan_range.__isset.iceberg_deletion_vector) {
+    scan_range_pb->set_iceberg_deletion_vector(tscan_range.iceberg_deletion_vector);
   }
 }
 

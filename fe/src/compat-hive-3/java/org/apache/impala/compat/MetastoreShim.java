@@ -33,7 +33,7 @@ import com.google.common.collect.Iterables;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -47,6 +47,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import org.apache.hadoop.hive.common.ValidWriteIdList;
+import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.hadoop.hive.metastore.api.AlreadyExistsException;
@@ -113,7 +114,6 @@ import org.apache.impala.catalog.events.MetastoreEvents.DerivedMetastoreTableEve
 import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEvent;
 import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEventPropertyKey;
 import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEventType;
-import org.apache.impala.catalog.events.MetastoreEvents.MetastoreTableEvent;
 import org.apache.impala.catalog.events.MetastoreEventsProcessor;
 import org.apache.impala.catalog.events.MetastoreEventsProcessor.MetaDataFilter;
 import org.apache.impala.catalog.events.MetastoreNotificationException;
@@ -126,11 +126,11 @@ import org.apache.impala.catalog.metastore.CatalogMetastoreServer;
 import org.apache.impala.catalog.metastore.ICatalogMetastoreServer;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.common.Metrics;
-import org.apache.impala.common.Pair;
 import org.apache.impala.common.PrintUtils;
 import org.apache.impala.hive.common.MutableValidWriteIdList;
 import org.apache.impala.service.BackendConfig;
 import org.apache.impala.service.CatalogOpExecutor;
+import org.apache.impala.service.JniCatalog;
 import org.apache.impala.util.AcidUtils.TblTransaction;
 import org.apache.impala.util.MetaStoreUtil;
 import org.apache.impala.util.MetaStoreUtil.TableInsertEventInfo;
@@ -725,7 +725,14 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
   public static void truncateTable(IMetaStoreClient msClient, String dbName,
       String tableName, List<String> partNames,
       String validWriteIds, long writeId) throws TException {
-    msClient.truncateTable(dbName, tableName, partNames, validWriteIds, writeId);
+    boolean deleteData = true;
+    // For transactional tables, use "hive.acid.truncate.usebase".
+    if (validWriteIds != null && writeId > 0) {
+      deleteData = !JniCatalog.HIVE_CONF.getBoolean(
+          HiveConf.ConfVars.HIVE_ACID_TRUNCATE_USE_BASE.varname, true);
+    }
+    msClient.truncateTable(dbName, tableName, partNames, validWriteIds, writeId,
+        deleteData);
   }
 
   /**
@@ -952,6 +959,13 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
     }
 
     @Override
+    protected Collection<TableName> getTableNames() {
+      return tableWriteIds_.stream()
+          .map(writeId -> new TableName(writeId.getDbName(), writeId.getTblName()))
+          .collect(Collectors.toSet());
+    }
+
+    @Override
     public String getTargetName() {
       if (tableNames_.isEmpty()) return CLUSTER_WIDE_TARGET;
       return tableNames_.stream().sorted().collect(Collectors.joining(","));
@@ -959,6 +973,7 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
 
     @Override
     protected void process() throws MetastoreNotificationException {
+      if (handleIfInCatchUpMode()) return;
       // Via getAllWriteEventInfo, we can get data insertion info for transactional tables
       // even though there are no insert events generated for transactional tables. Note
       // that we cannot get DDL info from this API.
@@ -1156,6 +1171,7 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
 
     @Override
     protected void processTableEvent() throws MetastoreNotificationException {
+      if (handleIfInCatchUpMode()) return;
       try {
         addCommittedWriteIdsAndReload(getCatalogOpExecutor(), dbName_, tblName_,
             isPartitioned_, isMaterializedView_, writeIdsInEvent_, partitions_,

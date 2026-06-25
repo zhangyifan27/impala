@@ -18,7 +18,9 @@
 #pragma once
 
 #include <list>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include <utility>
@@ -194,6 +196,10 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   /// Get a copy of the current exec summary. Thread-safe.
   void GetTExecSummary(TExecSummary* exec_summary);
+
+  /// Returns a map from filter ID to the set of target node IDs where the filter
+  /// rejected data. Calls ComputeEffectiveFilterTargets() if not already computed.
+  const std::map<int32_t, std::set<TPlanNodeId>>& GetEffectiveFilterTargets();
 
   /// Receive a local filter update from a fragment instance. Aggregate that filter update
   /// with others for the same filter ID into a global filter. If all updates for that
@@ -425,6 +431,61 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// True if all Exec() rpcs have completed.
   AtomicBool exec_rpcs_complete_{false};
 
+  class ExecQueryRpcStats {
+  public:
+    ExecQueryRpcStats(RuntimeProfile::SummaryStatsCounter* exec_rpc_sizes)
+      : execquery_rpc_sizes_(exec_rpc_sizes) {}
+
+    /// The shared TQueryCtx can be a major component of the size of the
+    /// ExecQueryFInstances RPC. This needs to be called before printing the warnings
+    /// so that the shared size information is available.
+    void SetSharedTQueryCtxSize(int64_t tqueryctx_size, int64_t descriptor_table_size);
+
+    /// Report the size of the ExecQueryFInstances RPC. This incorporates it into the
+    /// summary statistics.
+    void ReportRpcSize(int64_t size);
+
+    /// Report the size of an ExecQueryFInstances RPC that exceeded the warning
+    /// threshold. This will move the warning into the map of RPC warnings.
+    void ReportRpcSizeWithWarning(int64_t size, std::string&& warning_message);
+
+    /// If an RPC exceeded the warning threshold, print information to help
+    /// diagnose the issue. Specifically, this prints a summary for the whole query
+    /// with information about the average size of the RPCs and the size of the
+    /// shared components (the TQueryCtx) of the message. Then it prints more detailed
+    /// information about the largest few RPCs with more information about the backend
+    /// specific content of the message. This is not idempotent. It is intended to be
+    /// called once as the last operation on this structure, so it clears the warnings
+    /// data structure to save memory.
+    void PrintWarnings();
+
+  private:
+    /// Summary statistics about the size of ExecQueryFInstances RPCs. Updated as
+    /// the RPCs are sent.
+    RuntimeProfile::SummaryStatsCounter* execquery_rpc_sizes_ = nullptr;
+
+    /// Number of ExecQueryFInstances RPCs above the threshold
+    int64_t rpcs_above_warning_threshold_ = 0;
+
+    /// Size of the shared TQueryCtx piece of the RPC
+    int64_t tqueryctx_size_ = 0;
+
+    /// Size of the descriptor table, which can be a large portion of the TQueryCtx
+    int64_t descriptor_table_size_ = 0;
+
+    /// Structure to keep a warning string for the top three RPCs. This uses an
+    /// ordered map for simplicity. We want to be able to quickly evict the smallest
+    /// element, but we also want to be able to iterate from largest to smallest.
+    /// This is very small, so there is no benefit to using a heap based structure
+    /// like a std::priority_queue.
+    static constexpr int64_t MAX_EXEC_RPC_WARNINGS = 3;
+    std::multimap<int64_t, std::string> largest_rpc_warnings_;
+  };
+
+  /// Aggregated information about the ExecQueryFInstances RPCs for diagnosing
+  /// large RPCs.
+  std::unique_ptr<ExecQueryRpcStats> execquery_rpc_stats_;
+
   /// Barrier that is released when all backends have indicated execution completion,
   /// or when all backends are cancelled due to an execution error or client requested
   /// cancellation. Initialized in StartBackendExec().
@@ -461,6 +522,10 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   /// Contains all the state about filters being handled by this coordinator.
   std::unique_ptr<FilterRoutingTable> filter_routing_table_;
+
+  /// Cached map from filter ID to target node IDs where the filter rejected data.
+  /// Populated by BackendState::ApplyExecStatusReport().
+  std::map<int32_t, std::set<TPlanNodeId>> effective_filter_targets_;
 
   /// True if the first row has been fetched, false otherwise.
   bool first_row_fetched_ = false;
@@ -523,6 +588,10 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   /// Return the string representation of 'state'.
   static const char* ExecStateToString(const ExecState state);
+
+  /// Appends "CANCELLED" to label_detail for any nodes where at least one fragment
+  /// instance didn't complete execution, e.g., due to parent node reaches limit.
+  static void MarkCancelledNodes(TExecSummary* exec_summary);
 
   // For DCHECK_EQ, etc of ExecState values.
   friend std::ostream& operator<<(std::ostream& o, const ExecState s) {

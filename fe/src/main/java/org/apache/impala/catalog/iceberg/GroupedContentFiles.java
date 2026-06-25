@@ -18,19 +18,24 @@
 package org.apache.impala.catalog.iceberg;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.io.CloseableIterable;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
+import org.apache.impala.util.Hash128;
+import org.apache.impala.util.IcebergUtil;
 
 /**
  * Struct-like object to group different Iceberg content files:
@@ -47,6 +52,7 @@ public class GroupedContentFiles {
   public List<DataFile> dataFilesWithDeletes = new ArrayList<>();
   public Set<DeleteFile> positionDeleteFiles = new HashSet<>();
   public Set<DeleteFile> equalityDeleteFiles = new HashSet<>();
+  public Map<Hash128, DeleteFile> dataFileToDV = new HashMap<>();
 
   public GroupedContentFiles() { }
 
@@ -55,10 +61,22 @@ public class GroupedContentFiles {
       if (scanTask.deletes().isEmpty()) {
         dataFilesWithoutDeletes.add(scanTask.file());
       } else {
-        dataFilesWithDeletes.add(scanTask.file());
+        DataFile dataFile = scanTask.file();
+        dataFilesWithDeletes.add(dataFile);
         for (DeleteFile delFile : scanTask.deletes()) {
           if (delFile.content() == FileContent.POSITION_DELETES) {
-            positionDeleteFiles.add(delFile);
+            if (delFile.format() == FileFormat.PUFFIN) {
+              // A data file can have at most one DV, but may also be covered by legacy
+              // position-delete files simultaneously (e.g. after a partial V3 migration
+              // by an external engine). Assert there is no second DV for this file.
+              Hash128 dataFileHash = IcebergUtil.getFilePathHash(dataFile);
+              DeleteFile existing = dataFileToDV.put(dataFileHash, delFile);
+              Preconditions.checkState(existing == null,
+                  "More than one deletion vector found for data file: %s",
+                  dataFile.location());
+            } else {
+              positionDeleteFiles.add(delFile);
+            }
           } else {
             Preconditions.checkState(delFile.content() == FileContent.EQUALITY_DELETES);
             equalityDeleteFiles.add(delFile);

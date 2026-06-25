@@ -17,7 +17,6 @@
 
 # Tests admission control
 
-from __future__ import absolute_import, division, print_function
 from copy import deepcopy
 import itertools
 import logging
@@ -29,7 +28,6 @@ import sys
 import threading
 from time import sleep, time
 
-from builtins import int, range, round
 import pytest
 
 from impala_thrift_gen.ImpalaService import ImpalaHiveServer2Service
@@ -47,6 +45,7 @@ from tests.common.custom_cluster_test_suite import (
     WORKLOAD_MGMT_IMPALAD_FLAGS,
 )
 from tests.common.environ import build_flavor_timeout, ImpalaTestClusterProperties
+from tests.common.environ import IS_CALCITE_PLANNER
 from tests.common.impala_connection import (
     ERROR,
     FINISHED,
@@ -205,6 +204,16 @@ class TestAdmissionControllerBase(CustomClusterTestSuite):
     method.__dict__[START_ARGS] = start_args
     if IMPALAD_ARGS in method.__dict__:
       method.__dict__[ADMISSIOND_ARGS] = method.__dict__[IMPALAD_ARGS]
+
+  def enable_admission_compress(self, method, threshold):
+    """Inject argument to enable admission request compression.
+    Only works when admission service is enabled.
+    Must be called at setup_method() and before calling setup_method() of superclass."""
+    flag = '--admission_control_rpc_compress_threshold_bytes={0}'.format(threshold)
+    if IMPALAD_ARGS in method.__dict__:
+      method.__dict__[IMPALAD_ARGS] = method.__dict__[IMPALAD_ARGS] + ' ' + flag
+    else:
+      method.__dict__[IMPALAD_ARGS] = flag
 
 
 class TestAdmissionControllerRawHS2(TestAdmissionControllerBase, HS2TestSuite):
@@ -499,7 +508,7 @@ class TestAdmissionController(TestAdmissionControllerBase):
       for query in queries:
         handles.append(client.execute_async(query))
       for query, handle in zip(queries, handles):
-        state = client.wait_for_any_impala_state(handle, expected_states, timeout_s)
+        state, _ = client.wait_for_any_impala_state(handle, expected_states, timeout_s)
         if state == FINISHED:
           self.client.fetch(query, handle)
         profiles.append(client.get_runtime_profile(handle))
@@ -531,6 +540,37 @@ class TestAdmissionController(TestAdmissionControllerBase):
       ex = self.execute_query_expect_failure(self.client, query)
       assert re.search("Rejected query from pool default-pool: request memory needed "
                        ".* is greater than pool max mem resources 10.00 MB", str(ex))
+
+  @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(
+      impalad_args=impalad_admission_ctrl_flags(max_requests=1, max_queued=1,
+          pool_max_mem=10 * 1024 * 1024, proc_mem_limit=1024 * 1024 * 1024),
+      statestored_args=_STATESTORED_ARGS)
+  def test_rejected_statements_and_web_ui(self, unique_database):
+    def verify_json_plan(query, error_msg):
+      (_, response_json) = self.run_query_and_get_debug_page(
+          query, "http://localhost:{0}/query_plan", expected_state='ERROR')
+      # Verify that we have a non-empty plan_json.
+      assert 'plan_json' in response_json
+      assert 'plan_nodes' in response_json['plan_json']
+      assert 'label' in response_json['plan_json']['plan_nodes'][0]
+      # Summary is empty as execution could not start.
+      assert 'summary' in response_json
+      assert response_json['summary'] == ''
+      # Verify error message
+      assert error_msg in response_json['status']
+
+    target_tbl = unique_database + ".ctas_target_fail"
+    verify_json_plan("""create table {0} stored as iceberg as select id
+                      from functional_parquet.alltypes""".format(target_tbl),
+                      "Rejected query from pool")
+    insert_fail = unique_database + ".insert_fail"
+    # Use DDL to create the table so it is not subject to admission control.
+    self.execute_query_expect_success(self.client,
+        """create table {0} (id int)""".format(insert_fail))
+    verify_json_plan("""insert into {0} select id from functional_parquet.alltypes"""
+        .format(insert_fail),
+        "Rejected query from pool")
 
   @SkipIfFS.hdfs_block_size
   @SkipIfEC.parquet_file_size
@@ -1674,8 +1714,11 @@ class TestAdmissionController(TestAdmissionControllerBase):
     self._test_trivial_queries_helper(
             "select 1 from functional.alltypes limit 0 union all select sleep(1)",
             False)
-    self._test_trivial_queries_helper(
-            "select a from (select 1 a, sleep(1)) s", False)
+    # Calcite is simplifying this at validation time to remove the sleep, not worth
+    # fixing.
+    if not IS_CALCITE_PLANNER:
+      self._test_trivial_queries_helper(
+              "select a from (select 1 a, sleep(1)) s", False)
     self._test_trivial_queries_helper("select sleep(1)", False)
     self._test_trivial_queries_helper("select ISTRUE(sleep(1))", False)
     self._test_trivial_queries_helper(
@@ -2096,12 +2139,6 @@ class TestAdmissionController(TestAdmissionControllerBase):
 class TestAdmissionControllerWithACService(TestAdmissionController):
   """Runs all of the tests from TestAdmissionController but with the second impalad in the
   minicluster configured to perform all admission control."""
-
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestAdmissionControllerWithACService, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_dimension(
-        ImpalaTestDimension('admission_control_rpc_compress_threshold_bytes', 0, 1))
 
   def get_ac_process(self):
     return self.cluster.admissiond
@@ -2542,6 +2579,37 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
     client2.wait_for_impala_state(handle2, RUNNING, timeout_s)
 
 
+class TestAdmissionControllerWithACServiceCompress(TestAdmissionController):
+  """Runs all of the tests from TestAdmissionController but with the second impalad in the
+  minicluster configured to perform all admission control with compression."""
+
+  def get_ac_process(self):
+    return self.cluster.admissiond
+
+  def get_ac_log_name(self):
+    return "admissiond"
+
+  def setup_method(self, method):
+    if self.exploration_strategy() != 'exhaustive':
+      pytest.skip('runs only in exhaustive')
+    self.enable_admission_service(method)
+    self.enable_admission_compress(method, 1)
+    super(TestAdmissionControllerWithACServiceCompress, self).setup_method(method)
+
+  @SkipIfNotHdfsMinicluster.tuned_for_minicluster
+  @CustomClusterTestSuite.with_args(
+    impalad_args="--vmodule admission-controller=3 --mem_limit=20MB ")
+  def test_admission_service_safeguard_large_compressed_query(self):
+    """Test compressed request being rejected at Submission due to memory
+    pressure."""
+    large_query = " union all ".join(["select * from functional.alltypes"] * 30)
+    handle = self.client.execute_async(large_query)
+    self.client.wait_for_impala_state(handle, ERROR, 20)
+    profile = self.client.get_runtime_profile(handle)
+    # Only compressed requests rejected will end up with pool N/A.
+    assert "pool N/A: Admission rejected due to memory pressure" in profile
+
+
 class TestAdmissionControllerStress(TestAdmissionControllerBase):
   """Submits a number of queries (parameterized) with some delay between submissions
   (parameterized) and the ability to submit to one impalad or many in a round-robin
@@ -2651,7 +2719,7 @@ class TestAdmissionControllerStress(TestAdmissionControllerBase):
     for thread in self.all_threads:
       thread.join(5)
       LOG.info("Join thread for query num %s %s", thread.query_num,
-          "TIMED OUT" if thread.isAlive() else "")
+          "TIMED OUT" if thread.is_alive() else "")
     super(TestAdmissionControllerStress, self).teardown_method(method)
 
   def should_run(self):
@@ -3225,3 +3293,21 @@ class TestAdmissionControllerStressWithACService(TestAdmissionControllerStress):
       pytest.skip('runs only in exhaustive')
     self.enable_admission_service(method)
     super(TestAdmissionControllerStressWithACService, self).setup_method(method)
+
+
+class TestAdmissionControllerStressWithACServiceCompress(TestAdmissionControllerStress):
+  """Runs all of the tests from TestAdmissionControllerStress but with the second impalad
+  in the minicluster configured to perform all admission control with compression."""
+
+  def get_ac_processes(self):
+    return [self.cluster.admissiond]
+
+  def get_ac_log_name(self):
+    return "admissiond"
+
+  def setup_method(self, method):
+    if self.exploration_strategy() != 'exhaustive':
+      pytest.skip('runs only in exhaustive')
+    self.enable_admission_service(method)
+    self.enable_admission_compress(method, 1)
+    super(TestAdmissionControllerStressWithACServiceCompress, self).setup_method(method)

@@ -36,7 +36,7 @@ function setup-ranger {
     --header="accept:application/json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/groups |
-    python -c "import sys, json; print(json.load(sys.stdin)['id'])")
+    python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
   export GROUP_ID_OWNER
 
   GROUP_ID_NON_OWNER=$(wget -qO - --auth-no-challenge --user=admin \
@@ -44,7 +44,7 @@ function setup-ranger {
     --header="accept:application/json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/groups |
-    python -c "import sys, json; print(json.load(sys.stdin)['id'])")
+    python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
   export GROUP_ID_NON_OWNER
 
   GROUP_ID_NON_OWNER_2=$(wget -qO - --auth-no-challenge --user=admin \
@@ -52,7 +52,7 @@ function setup-ranger {
     --header="accept:application/json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/groups |
-    python -c "import sys, json; print(json.load(sys.stdin)['id'])")
+    python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
   export GROUP_ID_NON_OWNER_2
 
   perl -wpl -e 's/\$\{([^}]+)\}/defined $ENV{$1} ? $ENV{$1} : $&/eg' \
@@ -82,22 +82,22 @@ function setup-ranger {
     exit 1
   fi
 
-  wget -O /dev/null --auth-no-challenge --user=admin --password=admin \
+  wget -nv -O /dev/null --auth-no-challenge --user=admin --password=admin \
     --post-file="${RANGER_SETUP_DIR}/impala_user_owner.json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/users
 
-  wget -O /dev/null --auth-no-challenge --user=admin --password=admin \
+  wget -nv -O /dev/null --auth-no-challenge --user=admin --password=admin \
     --post-file="${RANGER_SETUP_DIR}/impala_user_non_owner.json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/users
 
-  wget -O /dev/null --auth-no-challenge --user=admin --password=admin \
+  wget -nv -O /dev/null --auth-no-challenge --user=admin --password=admin \
     --post-file="${RANGER_SETUP_DIR}/impala_user_non_owner_2.json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/xusers/secure/users
 
-  wget -O /dev/null --auth-no-challenge --user=admin --password=admin \
+  wget -nv -O /dev/null --auth-no-challenge --user=admin --password=admin \
     --post-file="${RANGER_SETUP_DIR}/impala_service.json" \
     --header="Content-Type:application/json" \
     http://localhost:6080/service/public/v2/api/service
@@ -109,7 +109,7 @@ function setup-ranger {
     http://localhost:6080/service/public/v2/api/service/test_impala/policy/\
 all%20-%20database \
     -H 'accept: application/json' | \
-  python -c "import sys, json; print(json.load(sys.stdin)['id'])")
+  python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
   export ALL_DATABASE_POLICY_ID
 
   perl -wpl -e 's/\$\{([^}]+)\}/defined $ENV{$1} ? $ENV{$1} : $&/eg' \

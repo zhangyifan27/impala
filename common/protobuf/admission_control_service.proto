@@ -95,6 +95,9 @@ message BackendExecParamsPB {
 
   // Indicates whether this backend is the coordinator.
   optional bool is_coord_backend = 7;
+
+  // Machine-level information (CPU, OS, etc.) for runtime profile analysis
+  optional MachineInfoPB machine_info = 10;
 }
 
 // Information about selected backend that designated as runtime filter preaggregator

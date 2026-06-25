@@ -81,13 +81,13 @@ export USE_AVRO_CPP=${USE_AVRO_CPP:=false}
 # moving to a different build of the toolchain, e.g. when a version is bumped or a
 # compile option is changed. The build id can be found in the output of the toolchain
 # build jobs, it is constructed from the build number and toolchain git hash prefix.
-export IMPALA_TOOLCHAIN_BUILD_ID_AARCH64=159-1fade8203e
-export IMPALA_TOOLCHAIN_BUILD_ID_X86_64=612-1fade8203e
+export IMPALA_TOOLCHAIN_BUILD_ID_AARCH64=177-d0713c535d
+export IMPALA_TOOLCHAIN_BUILD_ID_X86_64=640-d0713c535d
 export IMPALA_TOOLCHAIN_REPO=\
 ${IMPALA_TOOLCHAIN_REPO:-https://github.com/cloudera/native-toolchain.git}
 export IMPALA_TOOLCHAIN_BRANCH=${IMPALA_TOOLCHAIN_BRANCH:-master}
 export IMPALA_TOOLCHAIN_COMMIT_HASH=\
-${IMPALA_TOOLCHAIN_COMMIT_HASH-1fade8203e3df234dc5bab35cd32ff1f40d1db17}
+${IMPALA_TOOLCHAIN_COMMIT_HASH-d0713c535d0beddaa5457e634c9e3a35d14bc92c}
 # Compare the build ref in build IDs by removing everything up-to-and-including the
 # first hyphen.
 if [ "${IMPALA_TOOLCHAIN_BUILD_ID_AARCH64#*-}" \
@@ -105,7 +105,7 @@ if [[ ! "$IMPALA_TOOLCHAIN_COMMIT_HASH" == "$TOOLCHAIN_SHORT_HASH"* ]]; then
   exit 1
 fi
 
-export ARCH_NAME=$(uname -p)
+export ARCH_NAME=$(uname -m)
 
 # Versions of toolchain dependencies.
 # -----------------------------------
@@ -115,7 +115,7 @@ else
   export IMPALA_AVRO_VERSION=1.7.4-p5
 fi
 unset IMPALA_AVRO_URL
-export IMPALA_BINUTILS_VERSION=2.42
+export IMPALA_BINUTILS_VERSION=2.42-p24
 unset IMPALA_BINUTILS_URL
 export IMPALA_BOOST_VERSION=1.74.0-p1
 unset IMPALA_BOOST_URL
@@ -125,11 +125,11 @@ export IMPALA_BZIP2_VERSION=1.0.8-p2
 unset IMPALA_BZIP2_URL
 export IMPALA_CCTZ_VERSION=2.2
 unset IMPALA_CCTZ_URL
-export IMPALA_CMAKE_VERSION=3.22.2
+export IMPALA_CMAKE_VERSION=3.31.11
 unset IMPALA_CMAKE_URL
 export IMPALA_CRCUTIL_VERSION=2903870057d2f1f109b245650be29e856dc8b646
 unset IMPALA_CRCUTIL_URL
-export IMPALA_CURL_VERSION=8.14.1
+export IMPALA_CURL_VERSION=8.17.0
 unset IMPALA_CURL_URL
 export IMPALA_CYRUS_SASL_VERSION=2.1.23
 unset IMPALA_CYRUS_SASL_URL
@@ -157,7 +157,7 @@ export IMPALA_LLVM_VERSION=5.0.1-p8
 unset IMPALA_LLVM_URL
 export IMPALA_LLVM_ASAN_VERSION=5.0.1-p8
 unset IMPALA_LLVM_ASAN_URL
-export IMPALA_OPENTELEMETRY_CPP_VERSION=1.20.0
+export IMPALA_OPENTELEMETRY_CPP_VERSION=1.20.0-p1
 unset IMPALA_OPENTELEMTRY_CPP_URL
 
 # To limit maximum memory available for the mini-cluster and CDH cluster, add the
@@ -177,7 +177,7 @@ export IMPALA_LZ4_VERSION=1.9.3
 unset IMPALA_LZ4_URL
 export IMPALA_ZSTD_VERSION=1.5.2
 unset IMPALA_ZSTD_URL
-export IMPALA_OPENLDAP_VERSION=2.4.47
+export IMPALA_OPENLDAP_VERSION=2.5.20
 unset IMPALA_OPENLDAP_URL
 export IMPALA_ORC_VERSION=1.7.9-p11
 unset IMPALA_ORC_URL
@@ -189,9 +189,8 @@ export IMPALA_POSTGRES_JDBC_DRIVER_VERSION=42.5.6
 unset IMPALA_POSTGRES_JDBC_DRIVER_URL
 export IMPALA_MYSQL_JDBC_DRIVER_VERSION=8.2.0
 unset IMPALA_MYSQL_JDBC_DRIVER_URL
-export IMPALA_PYTHON_VERSION=2.7.16
+export IMPALA_PYTHON_VERSION=3.11.14
 unset IMPALA_PYTHON_URL
-export IMPALA_PYTHON3_VERSION=3.8.18
 export IMPALA_RAPIDJSON_VERSION=1.1.0-p1
 unset IMPALA_RAPIDJSON_URL
 export IMPALA_RE2_VERSION=2023-03-01
@@ -221,11 +220,9 @@ export IMPALA_MOLD_VERSION=2.40.4
 unset IMPALA_MOLD_URL
 
 # Impala JDBC driver for testing.
-export IMPALA_SIMBA_JDBC_DRIVER_VERSION=42-2.6.32.1041
+export IMPALA_SIMBA_JDBC_DRIVER_VERSION=2.6.39.1073
 
 # Find system python versions for testing
-# IMPALA-14606: Stop building impala_python (Python 2) by default.
-export IMPALA_SYSTEM_PYTHON2="${IMPALA_SYSTEM_PYTHON2_OVERRIDE-}"
 export IMPALA_SYSTEM_PYTHON3="${IMPALA_SYSTEM_PYTHON3_OVERRIDE-$(command -v python3)}"
 
 # Additional Python versions to use when building the impala-shell prebuilt tarball
@@ -264,10 +261,10 @@ export APACHE_MIRROR
 export APACHE_AVRO_JAVA_VERSION=1.11.1
 export APACHE_HADOOP_VERSION=3.4.1
 export APACHE_HBASE_VERSION=2.6.0
-export APACHE_ICEBERG_VERSION=1.5.2
+export APACHE_ICEBERG_VERSION=1.10.2
 export APACHE_KNOX_VERSION=2.0.0
 export APACHE_ORC_JAVA_VERSION=1.8.3
-export APACHE_PARQUET_VERSION=1.12.3
+export APACHE_PARQUET_VERSION=1.15.2
 export APACHE_RANGER_VERSION=2.4.0
 export APACHE_TEZ_VERSION=0.10.2
 export APACHE_HIVE_3_VERSION=3.1.3
@@ -290,7 +287,7 @@ export IMPALA_JACKSON_DATABIND_VERSION=2.15.3
 export IMPALA_JSON_SMART_VERSION=2.4.11
 export IMPALA_JUNIT_VERSION=4.12
 export IMPALA_KITE_VERSION=1.1.0
-export IMPALA_LOG4J2_VERSION=2.18.0
+export IMPALA_LOG4J2_VERSION=2.25.4
 export IMPALA_PAC4J_VERSION=4.5.5
 export IMPALA_RELOAD4j_VERSION=1.2.22
 export IMPALA_SLF4J_VERSION=2.0.13
@@ -300,7 +297,7 @@ export IMPALA_VELOCITY_ENGINE_CORE_VERSION=2.4.1
 export IMPALA_OBS_VERSION=3.1.1-hw-42
 export IMPALA_DBCP2_VERSION=2.12.0
 export IMPALA_DROPWIZARD_METRICS_VERSION=4.2.26
-export IMPALA_AIRCOMPRESSOR_VERSION=0.27
+export IMPALA_AIRCOMPRESSOR_VERSION=2.0.3
 export IMPALA_DATASKETCHES_VERSION=6.0.0
 export IMPALA_PAIMON_VERSION=1.3.1
 # When Impala is building docker images on Redhat-based distributions,
@@ -310,9 +307,9 @@ export IMPALA_PAIMON_VERSION=1.3.1
 # images (which have certain guarantees about maintenance, CVEs, etc).
 # These environment variables control the base images. They default to
 # free distributions, but Redhat UBI images are known to work.
-export IMPALA_REDHAT7_DOCKER_BASE=${IMPALA_REDHAT7_DOCKER_BASE:-"centos:centos7.9.2009"}
 export IMPALA_REDHAT8_DOCKER_BASE=${IMPALA_REDHAT8_DOCKER_BASE:-"rockylinux:8.5"}
 export IMPALA_REDHAT9_DOCKER_BASE=${IMPALA_REDHAT9_DOCKER_BASE:-"rockylinux:9.2"}
+export IMPALA_REDHAT10_DOCKER_BASE=${IMPALA_REDHAT10_DOCKER_BASE:-"rockylinux:10.2"}
 # Some users may want to use special, hardened base images for increased security.
 # These images are usually not related to the OS where the build is running.
 # The following environment variables allow a specific base image to be specified
@@ -336,6 +333,8 @@ export IMPALA_DOCKER_JAVA=${IMPALA_DOCKER_JAVA:-"17"}
 # to true due to the large performance benefits.
 export IMPALA_USE_CLOUDFLARE_ZLIB=${IMPALA_USE_CLOUDFLARE_ZLIB:-"true"}
 
+export USE_CALCITE_PLANNER=${USE_CALCITE_PLANNER:-"false"}
+
 # When IMPALA_(CDP_COMPONENT)_URL are overridden, they may contain '$(platform_label)'
 # which will be substituted for the CDP platform label in bootstrap_toolchain.py
 unset IMPALA_HADOOP_URL
@@ -349,8 +348,6 @@ export IMPALA_KERBERIZE=false
 
 unset IMPALA_TOOLCHAIN_KUDU_MAVEN_REPOSITORY
 unset IMPALA_TOOLCHAIN_KUDU_MAVEN_REPOSITORY_ENABLED
-
-export IMPALA_USE_PYTHON3_TESTS=${IMPALA_USE_PYTHON3_TESTS:-true}
 
 # Source the branch and local config override files here to override any
 # variables above or any variables below that allow overriding via environment
@@ -420,12 +417,14 @@ else
   export IMPALA_HADOOP_URL=${CDP_HADOOP_URL-}
   export IMPALA_HBASE_VERSION=${CDP_HBASE_VERSION}
   export IMPALA_HBASE_URL=${CDP_HBASE_URL-}
-  export IMPALA_ICEBERG_VERSION=${CDP_ICEBERG_VERSION}
+  # TODO(IMPALA-14727): Re-enable CDP_ICEBERG_VERSION once it is at least 1.10.1.
+  export IMPALA_ICEBERG_VERSION=${APACHE_ICEBERG_VERSION}
   export IMPALA_ICEBERG_URL=${CDP_ICEBERG_URL-}
   export IMPALA_KNOX_VERSION=${CDP_KNOX_VERSION}
   export IMPALA_ORC_JAVA_VERSION=${CDP_ORC_JAVA_VERSION}
   export IMPALA_OZONE_VERSION=${CDP_OZONE_VERSION}
-  export IMPALA_PARQUET_VERSION=${CDP_PARQUET_VERSION}
+  # TODO: Re-enable CDP_PARQUET_VERSION once it is at least 1.15.2.
+  export IMPALA_PARQUET_VERSION=${APACHE_PARQUET_VERSION}
   export IMPALA_RANGER_VERSION=${RANGER_VERSION_OVERRIDE:-"$CDP_RANGER_VERSION"}
   export IMPALA_RANGER_URL=${CDP_RANGER_URL-}
   export IMPALA_TEZ_VERSION=${CDP_TEZ_VERSION}
@@ -700,6 +699,7 @@ export azure_client_secret="${azure_client_secret-DummyAdlsClientSecret}"
 export azure_data_lake_store_name="${azure_data_lake_store_name-}"
 export azure_storage_account_name="${azure_storage_account_name-}"
 export azure_storage_container_name="${azure_storage_container_name-}"
+export azure_hns_enabled="${azure_hns_enabled-false}"
 export GOOGLE_CLOUD_PROJECT_ID="${GOOGLE_CLOUD_PROJECT_ID-}"
 export GOOGLE_CLOUD_SERVICE_ACCOUNT="${GOOGLE_CLOUD_SERVICE_ACCOUNT-}"
 export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS-}"
@@ -1300,7 +1300,6 @@ echo "IMPALA_ICEBERG_VERSION  = $IMPALA_ICEBERG_VERSION"
 echo "IMPALA_PAIMON_VERSION   = $IMPALA_PAIMON_VERSION"
 echo "IMPALA_COS_VERSION      = $IMPALA_COS_VERSION"
 echo "IMPALA_OBS_VERSION      = $IMPALA_OBS_VERSION"
-echo "IMPALA_SYSTEM_PYTHON2   = $IMPALA_SYSTEM_PYTHON2"
 echo "IMPALA_SYSTEM_PYTHON3   = $IMPALA_SYSTEM_PYTHON3"
 echo "IMPALA_BUILD_THREADS    = $IMPALA_BUILD_THREADS"
 echo "IMPALA_LINK_THREADS     = $IMPALA_LINK_THREADS"

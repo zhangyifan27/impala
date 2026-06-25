@@ -903,6 +903,7 @@ public class SelectStmt extends QueryStmt {
         TupleDescriptor tupleDesc = resolvedPath.destTupleDesc();
         FeTable table = tupleDesc.getTable();
         for (Column c: table.getColumnsInHiveOrder()) {
+          if (c.isHidden()) continue;
           // Omit auto-incrementing column for Kudu table since it's a hidden column.
           if (c instanceof KuduColumn && ((KuduColumn)c).isAutoIncrementing()) continue;
           addStarExpandedPath(selectListItem, resolvedPath, c.getName());
@@ -1557,6 +1558,7 @@ public class SelectStmt extends QueryStmt {
   private void optimizePlainCountStarQueryV2(TableRef tableRef, FeIcebergTable table)
       throws AnalysisException {
     boolean alreadyOptimized = false;
+    boolean hasCountStarFunc = false;
     for (SelectListItem selectItem : getSelectList().getItems()) {
       Expr expr = selectItem.getExpr();
       if (expr == null) return;
@@ -1566,7 +1568,9 @@ public class SelectStmt extends QueryStmt {
         continue;
       }
       if (!FunctionCallExpr.isCountStarFunctionCallExpr(expr)) return;
+      hasCountStarFunc = true;
     }
+    if (!hasCountStarFunc && !alreadyOptimized) return;
     long num = Utils.getRecordCountV2(table, tableRef.getTimeTravelSpec());
     if (num > 0) {
       tableRef.setOptimizeCountStarForIcebergV2(true);

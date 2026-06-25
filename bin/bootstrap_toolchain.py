@@ -54,7 +54,6 @@
 # The script is directly executable, and it takes no parameters:
 #     ./bootstrap_toolchain.py
 
-from __future__ import absolute_import, division, print_function
 import logging
 import multiprocessing.pool
 import os
@@ -74,8 +73,6 @@ from string import Template
 # /etc/os-release files.
 OsMapping = namedtuple('OsMapping', ['release', 'toolchain'])
 OS_MAPPING = [
-  OsMapping("rhel7", "ec2-package-centos-7"),
-  OsMapping("centos7", "ec2-package-centos-7"),
   OsMapping("rhel8", "ec2-package-centos-8"),
   OsMapping("centos8", "ec2-package-centos-8"),
   OsMapping("rocky8", "ec2-package-centos-8"),
@@ -83,10 +80,11 @@ OS_MAPPING = [
   OsMapping("rhel9", "ec2-package-rocky-9"),
   OsMapping("rocky9", "ec2-package-rocky-9"),
   OsMapping("almalinux9", "ec2-package-rocky-9"),
-  OsMapping("sles12", "ec2-package-sles-12"),
+  OsMapping("rhel10", "ec2-package-rocky-10"),
+  OsMapping("rocky10", "ec2-package-rocky-10"),
+  OsMapping("almalinux10", "ec2-package-rocky-10"),
   OsMapping("sles15", "ec2-package-sles-15"),
-  OsMapping('ubuntu16', "ec2-package-ubuntu-16-04"),
-  OsMapping('ubuntu18', "ec2-package-ubuntu-18-04"),
+  OsMapping("sles16", "ec2-package-sles-16"),
   OsMapping('ubuntu20', "ec2-package-ubuntu-20-04"),
   OsMapping('ubuntu22', "ec2-package-ubuntu-22-04"),
   OsMapping('ubuntu24', "ec2-package-ubuntu-24-04")
@@ -478,11 +476,9 @@ def get_toolchain_downloads():
        "glog", "gperftools", "jwt-cpp", "libev", "libunwind", "lz4", "mold",
        "openldap", "opentelemetry-cpp", "orc", "protobuf", "python", "rapidjson", "re2",
        "snappy", "tpc-h", "tpc-ds", "zlib", "zstd"]]
-  python3_package = ToolchainPackage(
-      "python", explicit_version=os.environ.get("IMPALA_PYTHON3_VERSION"))
   gtest_package = ToolchainPackage(
       "googletest", explicit_version=os.environ.get("IMPALA_GTEST_VERSION"))
-  toolchain_packages += [python3_package, gtest_package]
+  toolchain_packages += [gtest_package]
   toolchain_packages += get_unique_toolchain_downloads(
       ["thrift:cpp", "thrift:java", "thrift:py"])
   protobuf_package_clang = ToolchainPackage(

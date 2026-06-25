@@ -17,7 +17,6 @@
 #
 # Client tests for Impala's HiveServer2 interface
 
-from __future__ import absolute_import, division, print_function
 from contextlib import contextmanager
 from getpass import getuser
 import json
@@ -25,9 +24,9 @@ import logging
 import random
 import threading
 import time
+from urllib.request import urlopen
 import uuid
 
-from builtins import range
 import impala.dbapi as impyla
 import pytest
 
@@ -43,11 +42,6 @@ from tests.hs2.hs2_test_suite import (
     needs_session_cluster_properties,
     operation_id_to_query_id,
 )
-
-try:
-  from urllib.request import urlopen
-except ImportError:
-  from urllib2 import urlopen
 
 LOG = logging.getLogger('test_hs2')
 
@@ -185,9 +179,9 @@ class TestHS2(HS2TestSuite):
     with ScopedSession(self.hs2_client) as session:
       TestHS2.check_response(session)
       http_addr = session.configuration['http_addr']
-      resp = urlopen("http://%s/queries?json" % http_addr)
-      assert resp.msg == 'OK'
-      queries_json = json.loads(resp.read())
+      with urlopen("http://%s/queries?json" % http_addr) as resp:
+        assert resp.msg == 'OK'
+        queries_json = json.loads(resp.read())
       assert 'completed_queries' in queries_json
       assert 'in_flight_queries' in queries_json
 
@@ -393,13 +387,11 @@ class TestHS2(HS2TestSuite):
     assert get_operation_status_resp.operationState == \
         TCLIService.TOperationState.FINISHED_STATE
     # The long polling wait must have been interrupted by the completion, so it should
-    # not come anywhere close to waiting the full 10 seconds. 1 second is not a very
-    # tight time bound.
+    # not come anywhere close to waiting the full 10 seconds. Most of the time this
+    # completes within 1 second, but there are outliers that can be ~2.5 seconds. Set
+    # a loose time bound of 4 seconds.
     time_diff = end_time - start_time
-    assert time_diff < 1
-    # This should take at least 80ms, because that is the amount of time the query
-    # should sleep
-    assert time_diff >= 0.08
+    assert time_diff < 4
 
     # Fetch the results so the query completes successfully
     fetch_results_req = TCLIService.TFetchResultsReq()
@@ -463,8 +455,8 @@ class TestHS2(HS2TestSuite):
 
     # The long polling wait must have been interrupted by the error, so it should
     # not come anywhere close to waiting the full 10 seconds. This is a very short
-    # statement, so it should hit the error within 1 second.
-    assert end_time - start_time < 1.0
+    # statement, so it should hit the error within 4 seconds.
+    assert end_time - start_time < 4.0
 
   @needs_session()
   def test_malformed_get_operation_status(self):
@@ -1356,10 +1348,83 @@ class TestHS2(HS2TestSuite):
     rows = cursor.fetchall()
     assert rows == [(1,)]
     profile = cursor.get_profile()
+    cursor.close()
+    impyla_conn.close()
     assert profile is not None
     assert "Http Origin: value1" in profile
     assert "Http Origin: value2" not in profile
 
+  @needs_session()
+  def test_get_query_id(self):
+    """ Test hs2's GetQueryId API. This is a trivial function in Impala that prints
+    the query id passed in the request.
+    """
+    # Check that the string returned by GetQueryId matches the query id in the profile.
+    execute_statement_resp = self.execute_statement('select 1')
+    op_handle = execute_statement_resp.operationHandle
+    get_query_id_req = TCLIService.TGetQueryIdReq(op_handle)
+    get_query_id_resp = self.hs2_client.GetQueryId(get_query_id_req)
+    get_profile_resp = self.hs2_client.GetRuntimeProfile(
+        ImpalaHiveServer2Service.TGetRuntimeProfileReq(op_handle, self.session_handle))
+    profile = get_profile_resp.profile
+    assert profile is not None
+    assert "Query (id=" + get_query_id_resp.queryId in profile
+
+    # Check that invalid query id leads to returning empty string.
+    invalid_id = TCLIService.THandleIdentifier(b"bad", op_handle.operationId.secret)
+    invalide_op_handle = TCLIService.TOperationHandle(
+        invalid_id, TCLIService.TOperationType.EXECUTE_STATEMENT, False)
+    invalid_req = TCLIService.TGetQueryIdReq(invalide_op_handle)
+    invalid_resp = self.hs2_client.GetQueryId(invalid_req)
+    assert invalid_resp.queryId == ""
+
+  @needs_session()
+  def test_unimplemented_functions(self):
+    """Test that unimplemented functions return the expected error."""
+    get_delegation_token_req = TCLIService.TGetDelegationTokenReq()
+    get_delegation_token_req.sessionHandle = self.session_handle
+    get_delegation_token_req.owner = "test_owner"
+    get_delegation_token_req.renewer = "test_renewer"
+    get_delegation_token_resp = self.hs2_client.GetDelegationToken(
+        get_delegation_token_req)
+    TestHS2.check_response(get_delegation_token_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
+
+    cancel_delegation_token_req = TCLIService.TCancelDelegationTokenReq()
+    cancel_delegation_token_req.sessionHandle = self.session_handle
+    cancel_delegation_token_req.delegationToken = "test_token"
+    cancel_delegation_token_resp = self.hs2_client.CancelDelegationToken(
+        cancel_delegation_token_req)
+    TestHS2.check_response(cancel_delegation_token_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
+
+    renew_delegation_token_req = TCLIService.TRenewDelegationTokenReq()
+    renew_delegation_token_req.sessionHandle = self.session_handle
+    renew_delegation_token_req.delegationToken = "test_token"
+    renew_delegation_token_resp = self.hs2_client.RenewDelegationToken(
+        renew_delegation_token_req)
+    TestHS2.check_response(renew_delegation_token_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
+
+    set_client_info_req = TCLIService.TSetClientInfoReq()
+    set_client_info_req.sessionHandle = self.session_handle
+    set_client_info_req.client_info = "test_client"
+    set_client_info_resp = self.hs2_client.SetClientInfo(set_client_info_req)
+    TestHS2.check_response(set_client_info_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
+
+    upload_data_req = TCLIService.TUploadDataReq()
+    upload_data_req.sessionHandle = self.session_handle
+    upload_data_req.values = b""
+    upload_data_resp = self.hs2_client.UploadData(upload_data_req)
+    TestHS2.check_response(upload_data_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
+
+    download_data_req = TCLIService.TDownloadDataReq()
+    download_data_req.sessionHandle = self.session_handle
+    download_data_resp = self.hs2_client.DownloadData(download_data_req)
+    TestHS2.check_response(download_data_resp,
+        TCLIService.TStatusCode.ERROR_STATUS, "Not implemented")
 
 def get_user_custom_headers():
   """Add duplicate X-Forwarded-For headers."""

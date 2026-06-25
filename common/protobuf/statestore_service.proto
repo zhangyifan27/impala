@@ -31,6 +31,19 @@ message ExecutorGroupDescPB {
   optional int64 min_size = 2;
 }
 
+// Structure to describe machine-level information for a backend.
+// This information is used in runtime profiles for performance analysis.
+message MachineInfoPB {
+  // CPU model name (e.g., "Intel(R) Xeon(R) Silver 4215R CPU @ 3.20GHz")
+  optional string cpu_model_name = 1;
+
+  // Number of CPU cores available on this backend
+  optional int32 cpu_num_cores = 2;
+
+  // OS distribution name (e.g., "Ubuntu 22.04.5 LTS", "CentOS Linux 7")
+  optional string os_distribution = 3;
+}
+
 // Structure serialised in the Impala backend topic. Each Impalad
 // constructs one BackendDescriptorPB, and registers it in the cluster-membership
 // topic. Impalads subscribe to this topic to learn of the location of
@@ -90,4 +103,7 @@ message BackendDescriptorPB {
   // within an executor group, but executors in different executor groups can use the
   // same identifier.
   optional string scheduling_seed = 15;
+
+  // Machine-level information (CPU, OS, etc.) for runtime profile analysis
+  optional MachineInfoPB machine_info = 16;
 }

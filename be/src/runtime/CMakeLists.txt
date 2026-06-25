@@ -102,6 +102,7 @@ if (BUILD_WITH_NO_TESTS)
 endif()
 
 add_library(RuntimeTests STATIC
+  backend-machine-info-aggregator-test.cc
   coordinator-backend-state-test.cc
   date-test.cc
   decimal-test.cc
@@ -124,6 +125,8 @@ add_library(RuntimeTests STATIC
 )
 add_dependencies(RuntimeTests gen-deps)
 
+ADD_UNIFIED_BE_LSAN_TEST(backend-machine-info-aggregator-test
+    "MachineInfoPbStringTest.*:BackendMachineInfoAggregatorTest.*")
 ADD_UNIFIED_BE_LSAN_TEST(coordinator-backend-state-test CoordinatorBackendStateTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(mem-pool-test MemPoolTest.*)
 ADD_BE_TEST(client-cache-test)

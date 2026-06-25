@@ -21,7 +21,7 @@
 #include "common/object-pool.h"
 #include "common/status.h"
 #include "exec/catalog-op-executor.h"
-#include "observe/span-manager.h"
+#include "observe/otel-trace-manager.h"
 #include "rpc/rpc-trace.h"
 #include "service/child-query.h"
 #include "service/impala-server.h"
@@ -545,11 +545,17 @@ class ClientRequestState {
     client_fetch_lock_wait_timer_->Add(lock_wait_time_ns);
   }
 
-  /// Returns the OpenTelemetry SpanManager for this query.
-  std::shared_ptr<SpanManager> otel_span_manager() { return otel_span_manager_; }
+  /// Returns the OpenTelemetry OtelTraceManager for this query.
+  std::shared_ptr<OtelTraceManager> otel_trace_manager() { return otel_trace_manager_; }
 
-  /// Returns true if OpenTelemetry tracing is enabled for this query.
-  inline bool otel_trace_query() const { return otel_span_manager_.get() != nullptr; }
+  /// Returns true if OpenTelemetry tracing is enabled for this query and the trace
+  /// has not yet ended.
+  inline bool otel_trace_query() const {
+    return otel_trace_manager_.get() != nullptr && !otel_trace_manager_->HasEnded();
+  }
+
+  /// Returns true if request is cancelled. Acquires lock_ to avoid dirty reads.
+  bool is_cancelled();
 
  protected:
   /// Updates the end_time_us_ of this query if it isn't set. The end time is determined
@@ -830,8 +836,8 @@ class ClientRequestState {
   /// remote.
   std::unique_ptr<AdmissionControlClient> admission_control_client_;
 
-  /// SpanManager instance for this query.
-  std::shared_ptr<SpanManager> otel_span_manager_;
+  /// OtelTraceManager instance for this query.
+  std::shared_ptr<OtelTraceManager> otel_trace_manager_;
 
   /// Executes a local catalog operation (an operation that does not need to execute
   /// against the catalog service). Includes USE, SHOW, DESCRIBE, and EXPLAIN statements.
@@ -844,9 +850,6 @@ class ClientRequestState {
   /// Updates last_active_time_ms_ and ref_count_ to reflect that query is currently being
   /// actively processed. Takes expiration_data_lock_.
   void MarkActive();
-
-  /// Returns true if request is cancelled. Acquires lock_ to avoid dirty reads.
-  bool is_cancelled();
 
   /// Sets up profile and pre-execution counters, creates the query schedule, and calls
   /// FinishExecQueryOrDmlRequest() which contains the core logic of executing a QUERY or
@@ -920,14 +923,21 @@ class ClientRequestState {
   bool CreateIcebergCatalogOps(const TFinalizeParams& finalize_params,
       TIcebergOperationParam* cat_ice_op);
 
+  /// Sets either the deletion vector fields or the pos-delete fields on 'cat_ice_op'
+  /// (the two are mutually exclusive). Also populates
+  /// data_files_referenced_by_position_deletes. Returns true iff any delete artifacts
+  /// were produced (i.e. the delete side of the operation is not a no-op).
+  bool SetDeleteArtifacts(DmlExecState* dml_exec_state,
+      TIcebergOperationParam* cat_ice_op);
+
   /// Copies results into request_result_set_
   /// TODO: Have the FE return list<Data.TResultRow> so that this isn't necessary
   void SetResultSet(const TDdlExecResponse* ddl_resp);
   void SetResultSet(const std::vector<std::string>& results);
   void SetResultSet(const std::vector<std::string>& col1,
       const std::vector<std::string>& col2);
-  void SetResultSet(const vector<string>& col1,
-      const vector<string>& col2, const vector<string>& col3);
+  void SetResultSet(const std::vector<std::string>& col1,
+      const std::vector<std::string>& col2, const std::vector<std::string>& col3);
   void SetResultSet(const std::vector<std::string>& col1,
       const std::vector<std::string>& col2, const std::vector<std::string>& col3,
       const std::vector<std::string>& col4);

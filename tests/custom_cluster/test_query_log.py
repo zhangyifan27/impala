@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from getpass import getuser
 import os
 from random import choice, randint
@@ -47,7 +46,7 @@ from tests.util.workload_management import (
 
 
 class TestQueryLogTableBasic(WorkloadManagementTestSuite):
-  """Tests to assert the query log table is correctly populated when using the Beeswax
+  """Tests to assert the query log table is correctly populated when using the HS2
      client protocol."""
 
   @classmethod
@@ -930,7 +929,7 @@ class TestQueryLogTableBufferPool(WorkloadManagementTestSuite):
     # When buffer pool limit is not None, the test is forcing the query to spill. Thus,
     # a large number of records is needed to force the spilling.
     if buffer_pool_limit is not None:
-      test_sql = "select a.*,b.*,c.* from " \
+      test_sql = "select straight_join a.*,b.*,c.* from " \
         "functional.zipcode_incomes a inner join functional.zipcode_timezones b on " \
         "a.zip = b.zip inner join functional.alltimezones c on b.timezone = c.timezone"
 
@@ -967,11 +966,6 @@ class TestQueryLogTableBufferPool(WorkloadManagementTestSuite):
 class TestQueryLogQueuedQueries(WorkloadManagementTestSuite):
   """Simulates a cluster that is under load and has queries that are queueing in
      admission control."""
-
-  @classmethod
-  def add_test_dimensions(cls):
-    super(TestQueryLogQueuedQueries, cls).add_test_dimensions()
-    cls.ImpalaTestMatrix.add_dimension(hs2_client_protocol_dimension())
 
   @CustomClusterTestSuite.with_args(
       impalad_args=impalad_admission_ctrl_config_args(

@@ -26,10 +26,10 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.ipc.RemoteException;
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.impala.analysis.TableName;
-import org.apache.impala.catalog.FeFsPartition;
 import org.apache.impala.catalog.HdfsPartition;
 import org.apache.impala.common.FileSystemUtil;
 import org.apache.impala.common.ImpalaException;
@@ -42,7 +42,7 @@ import com.google.common.base.Preconditions;
  * Utility class for submitting and dropping HDFS cache requests.
  */
 public class HdfsCachingUtil {
-  private static final Logger LOG = Logger.getLogger(HdfsCachingUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HdfsCachingUtil.class);
 
   // The key name used to save cache directive IDs in table/partition properties.
   public final static String CACHE_DIR_ID_PROP_NAME = "cache_directive_id";

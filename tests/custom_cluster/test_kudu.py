@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 import logging
 import os
 import pytest
@@ -26,7 +25,7 @@ from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
 from tests.common.environ import ImpalaTestClusterProperties
 from tests.common.impala_connection import FINISHED, IMPALA_CONNECTION_EXCEPTION
 from tests.common.kudu_test_suite import KuduTestSuite
-from tests.common.skip import SkipIfKudu, SkipIfBuildType, SkipIf
+from tests.common.skip import SkipIfKudu, SkipIfBuildType, SkipIf, SkipIfCalcite
 from tests.common.test_dimensions import HS2, add_mandatory_exec_option
 from tests.common.test_result_verifier import error_msg_startswith
 
@@ -40,9 +39,8 @@ class CustomKuduTest(CustomClusterTestSuite, KuduTestSuite):
 
   @classmethod
   def default_test_protocol(cls):
-    # run_test_case() can produce different result types between beeswax vs hs2 protocol
-    # in some tests. This fix the test to use beeswax protocol until we can migrate
-    # to hs2.
+    # This forces the test to use hs2 protocol so that run_test_case() can produce
+    # consistent result.
     return HS2
 
   @classmethod
@@ -143,6 +141,7 @@ class TestKuduClientTimeout(CustomKuduTest):
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(impalad_args="-kudu_operation_timeout_ms=1")
   @SkipIfKudu.hms_integration_enabled()
+  @SkipIfCalcite.kudu_not_supported
   def test_impalad_timeout(self, vector):
     """Check impalad behavior when -kudu_operation_timeout_ms is too low."""
     self.run_test_case('QueryTest/kudu-timeouts-impalad', vector)

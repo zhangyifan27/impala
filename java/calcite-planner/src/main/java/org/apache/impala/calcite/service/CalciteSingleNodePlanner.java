@@ -17,10 +17,14 @@
 
 package org.apache.impala.calcite.service;
 
+import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.core.Values;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
 import org.apache.impala.analysis.ExprSubstitutionMap;
 import org.apache.impala.analysis.ParsedStatement;
 import org.apache.impala.calcite.rel.node.ImpalaPlanRel;
@@ -36,6 +40,7 @@ import org.apache.impala.thrift.TResultSetMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -52,6 +57,7 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
   private NodeWithExprs rootNode_;
   private List<String> fieldNames_;
   private boolean returnsMoreThanOneRow_;
+  private RelNode finalPlan_;
 
   public CalciteSingleNodePlanner(PlannerContext ctx) {
     ctx_ = ctx;
@@ -69,6 +75,7 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
     CalciteOptimizer optimizer =
         new CalciteOptimizer(analysisResult_, ctx_.getTimeline());
     ImpalaPlanRel optimizedPlan = optimizer.optimize(logicalPlan);
+    this.finalPlan_ = optimizedPlan;
 
     returnsMoreThanOneRow_ = returnsMoreThanOneRow(optimizedPlan);
 
@@ -81,6 +88,11 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
     return rootNode_.planNode_;
   }
 
+  @Override
+  public String calcitePlan() {
+    return finalPlan_ == null ? "" : RelOptUtil.toString(finalPlan_);
+  }
+
   /**
    * Creates the DataSink needed by the framework. Only the original planner
    * requires the substition map passed in.
@@ -91,7 +103,18 @@ public class CalciteSingleNodePlanner implements SingleNodePlannerIntf {
   }
 
   private boolean returnsMoreThanOneRow(RelNode logicalPlan) {
-    return !isSingleRowValues(logicalPlan) && !hasOneRowAgg(logicalPlan);
+    return !hasTopLevelLimitOfOne(logicalPlan) &&
+        !isSingleRowValues(logicalPlan) && !hasOneRowAgg(logicalPlan);
+  }
+
+  private boolean hasTopLevelLimitOfOne(RelNode relNode) {
+    // The "Sort" RelNode is used for limit and offset in addition to "order by" clauses.
+    if (!(relNode instanceof Sort)) {
+      return false;
+    }
+    RexNode fetch = ((Sort) relNode).fetch;
+    return fetch != null &&
+        ((BigDecimal) RexLiteral.value(fetch)).longValue() == 1;
   }
 
   private boolean isSingleRowValues(RelNode relNode) {

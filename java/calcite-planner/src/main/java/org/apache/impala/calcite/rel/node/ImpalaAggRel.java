@@ -148,6 +148,9 @@ public class ImpalaAggRel extends Aggregate
       simplifiedAnalyzer.setUnassignedConjuncts(converter.getImpalaConjuncts());
     }
     aggNode.init(simplifiedAnalyzer);
+    if (returnsSingleRow(this)) {
+      ((AggregationNode) aggNode).setIsNonCorrelatedScalarSubquery(true);
+    }
     simplifiedAnalyzer.clearUnassignedConjuncts();
 
     return new NodeWithExprs(aggNode, outputExprs, getRowType().getFieldNames());
@@ -397,8 +400,7 @@ public class ImpalaAggRel extends Aggregate
 
     int inputRef = getAggCallList().get(0).getArgList().get(0);
     // output expressions do not change from the input
-    List<Expr> outputExprs =
-        ImmutableList.of(inputNodeWithExprs.outputExprs_.get(inputRef));
+    List<Expr> outputExprs = inputNodeWithExprs.outputExprs_;
 
     CardinalityCheckNode cardinalityCheckNode = new CardinalityCheckNode(
         ctx.getNextNodeId(), inputNodeWithExprs.planNode_, "CARDINALITY CHECK");
@@ -444,6 +446,10 @@ public class ImpalaAggRel extends Aggregate
     }
 
     return builder.build();
+  }
+
+  public static boolean returnsSingleRow(Aggregate agg) {
+    return agg.getGroupCount() == 0 && agg.getAggCallList().size() == 1;
   }
 
   @Override

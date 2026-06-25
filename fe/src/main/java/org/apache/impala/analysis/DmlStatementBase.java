@@ -17,6 +17,7 @@
 
 package org.apache.impala.analysis;
 
+import java.util.Collections;
 import java.util.Map;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.FeKuduTable;
@@ -69,7 +70,19 @@ public abstract class DmlStatementBase extends StatementBase {
 
   abstract public DataSink createDataSink();
   abstract public void substituteResultExprs(ExprSubstitutionMap smap, Analyzer analyzer);
+  /**
+   * The DML sink writes data into partitions according to the partition key exprs.
+   */
   abstract public List<Expr> getPartitionKeyExprs();
+  /**
+   * Returns the expressions that the exchange node should use to hash-partition rows
+   * before they reach the sink. A non-empty list means the shuffle is required.
+   * E.g. getShuffleExprs() returns a non-empty list when:
+   *  1) shuffling is required for correctness (Iceberg V3 tables with DVs)
+   *     (even for non-partitioned tables)
+   *  2) partition exprs have low cardinality, so custom shuffle exprs can fan-out writers
+   */
+  public List<Expr> getShuffleExprs() { return Collections.emptyList(); }
   abstract public List<Expr> getSortExprs();
   abstract public TSortingOrder getSortingOrder();
 

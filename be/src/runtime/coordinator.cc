@@ -26,7 +26,6 @@
 #include <thrift/protocol/TDebugProtocol.h>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/filesystem.hpp>
-#include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string.hpp>
 #include <gutil/strings/substitute.h>
@@ -40,6 +39,7 @@
 #include "kudu/rpc/rpc_context.h"
 #include "kudu/rpc/rpc_sidecar.h"
 #include "observe/otel.h"
+#include "runtime/backend-machine-info-aggregator.h"
 #include "runtime/coordinator-backend-state.h"
 #include "runtime/coordinator-filter-state.h"
 #include "runtime/debug-options.h"
@@ -63,6 +63,7 @@
 #include "util/in-list-filter.h"
 #include "util/min-max-filter.h"
 #include "util/pretty-printer.h"
+#include "util/summary-util.h"
 #include "util/table-printer.h"
 #include "util/uid-util.h"
 
@@ -82,6 +83,7 @@ using boost::filesystem::path;
 
 DECLARE_bool(gen_experimental_profile);
 DECLARE_string(hostname);
+DECLARE_int64(large_execquery_rpc_threshold_bytes);
 
 using namespace impala;
 
@@ -120,6 +122,8 @@ PROFILE_DEFINE_COUNTER(NumCompletedBackends, STABLE_HIGH, TUnit::UNIT,"The numbe
     "Does not count the number of CANCELLED Backends.");
 PROFILE_DEFINE_TIMER(FinalizationTimer, STABLE_LOW,
     "Total time spent in finalization (typically 0 except for INSERT into hdfs tables).");
+PROFILE_DEFINE_SUMMARY_STATS_COUNTER(ExecQueryRPCSizes, STABLE_LOW, TUnit::BYTES,
+    "Summary statistics about the size of RPCs sent to start query execution.");
 
 const string Coordinator::PROFILE_EVENT_LABEL_FIRST_ROW_FETCHED = "First row fetched";
 
@@ -160,6 +164,8 @@ Status Coordinator::Exec() {
       obj_pool(), "Execution Profile " + PrintId(query_id()), false);
   finalization_timer_ = PROFILE_FinalizationTimer.Instantiate(query_profile_);
   filter_updates_received_ = PROFILE_FiltersReceived.Instantiate(query_profile_);
+  execquery_rpc_stats_ = make_unique<ExecQueryRpcStats>(
+      PROFILE_ExecQueryRPCSizes.Instantiate(query_profile_));
 
   host_profiles_ = RuntimeProfile::Create(obj_pool(), "Per Node Profiles", false);
   query_profile_->AddChild(host_profiles_);
@@ -308,10 +314,10 @@ void Coordinator::ExecSummary::Init(const QueryExecParams& exec_params) {
       // Note that some clients like impala-shell depend on many of these fields being
       // set, even if they are optional in the thrift.
       TPlanNodeExecSummary& node_summary = thrift_exec_summary.nodes.back();
-      node_summary.__set_node_id(-1);
+      node_summary.__set_node_id(SINK_NODE_ID);
       node_summary.__set_fragment_idx(fragment.idx);
       node_summary.__set_label(output_sink.label);
-      node_summary.__set_label_detail("");
+      node_summary.__set_label_detail(output_sink.label_detail);
       node_summary.__set_num_children(1);
       DCHECK(output_sink.__isset.estimated_stats);
       node_summary.__set_estimated_stats(output_sink.estimated_stats);
@@ -414,6 +420,10 @@ void Coordinator::InitFilterRoutingTable() {
         }
       }
     }
+  }
+
+  for (auto& entry : filter_routing_table_->id_to_filter) {
+    entry.second.SortTargets();
   }
 
   query_profile_->AddInfoString(
@@ -544,6 +554,12 @@ Status Coordinator::StartBackendExec() {
     return UpdateExecState(serialize_status, nullptr, FLAGS_hostname);
   }
   kudu::Slice query_ctx_slice(serialized_buf, serialized_len);
+  // Incorporate the size of the shared TQueryCtx into the ExecQueryRpcStats. This also
+  // includes information about the size of the descriptor table, because that can
+  // be a major component of the TQueryCtx's size.
+  int64_t descriptor_table_size = query_ctx().desc_tbl_serialized.thrift_desc_tbl.size();
+  execquery_rpc_stats_->SetSharedTQueryCtxSize(query_ctx_slice.size(),
+      descriptor_table_size);
 
   for (BackendState* backend_state: backend_states_) {
     if (exec_rpcs_status_barrier_.pending() <= 0) {
@@ -556,8 +572,11 @@ Status Coordinator::StartBackendExec() {
     // because it won't be torn down until WaitOnExecRpcs() has returned.
     DCHECK(filter_mode_ == TRuntimeFilterMode::OFF || filter_routing_table_->is_complete);
     backend_state->ExecAsync(debug_options, *filter_routing_table_, query_ctx_slice,
-        &exec_rpcs_status_barrier_);
+        &exec_rpcs_status_barrier_, execquery_rpc_stats_.get());
   }
+  // The ExecQueryRpcStats accumulated any warnings from sending the exec RPCs. Print the
+  // summary now.
+  execquery_rpc_stats_->PrintWarnings();
   Status exec_rpc_status = exec_rpcs_status_barrier_.Wait();
   if (!exec_rpc_status.ok()) {
     // One of the backends failed to startup, so we cancel the other ones.
@@ -595,7 +614,7 @@ Status Coordinator::StartBackendExec() {
           num_backends, exec_params_.GetNumFragmentInstances()));
 
   if (parent_request_state_->otel_trace_query()) {
-    parent_request_state_->otel_span_manager()->AddChildSpanEvent("AllBackendsStarted");
+    parent_request_state_->otel_trace_manager()->AddChildSpanEvent("AllBackendsStarted");
   }
   return Status::OK();
 }
@@ -643,6 +662,7 @@ string Coordinator::FilterDebugString() {
   table_printer.AddColumn("ID", false);
   table_printer.AddColumn("Src. Node", false);
   table_printer.AddColumn("Tgt. Node(s)", false);
+  table_printer.AddColumn("Eff. Tgt. Node(s)", false);
   table_printer.AddColumn("Target type", false);
   table_printer.AddColumn("Partition filter", false);
   // Distribution metrics are only meaningful if the coordinator is routing the filter.
@@ -657,22 +677,29 @@ string Coordinator::FilterDebugString() {
   table_printer.AddColumn("Min value", false);
   table_printer.AddColumn("Max value", false);
   table_printer.AddColumn("In-list size", false);
-  ObjectPool temp_object_pool;
-  MemTracker temp_mem_tracker;
   for (auto& v: filter_routing_table_->id_to_filter) {
     vector<string> row;
     const FilterState& state = v.second;
-    row.push_back(lexical_cast<string>(v.first));
-    row.push_back(lexical_cast<string>(state.desc().src_node_id));
+    row.push_back(std::to_string(v.first));
+    row.push_back(std::to_string(state.desc().src_node_id));
     vector<string> target_ids;
     vector<string> target_types;
     vector<string> partition_filter;
     for (const FilterTarget& target: state.targets()) {
-      target_ids.push_back(lexical_cast<string>(target.node_id));
+      target_ids.push_back(std::to_string(target.node_id));
       target_types.push_back(target.is_local ? "LOCAL" : "REMOTE");
       partition_filter.push_back(target.is_bound_by_partition_columns ? "true" : "false");
     }
     row.push_back(join(target_ids, ", "));
+    vector<string> effective_target_ids;
+    auto eff_it = effective_filter_targets_.find(v.first);
+    if (eff_it != effective_filter_targets_.end()) {
+      for (TPlanNodeId node_id : eff_it->second) {
+        effective_target_ids.push_back(std::to_string(node_id));
+      }
+    }
+    // "N" means in "None" of the nodes the filter is effective.
+    row.push_back(effective_target_ids.empty() ? "N" : join(effective_target_ids, ", "));
     row.push_back(join(target_types, ", "));
     row.push_back(join(partition_filter, ", "));
 
@@ -771,10 +798,13 @@ string Coordinator::FilterDebugString() {
     }
     table_printer.AddRow(row);
   }
-  temp_mem_tracker.Close();
   // Add a line break, as in all contexts this is called we need to start a new line to
   // print it correctly.
   return Substitute("\n$0", table_printer.ToString());
+}
+
+const std::map<int32_t, std::set<TPlanNodeId>>& Coordinator::GetEffectiveFilterTargets() {
+  return effective_filter_targets_;
 }
 
 const char* Coordinator::ExecStateToString(const ExecState state) {
@@ -1023,7 +1053,7 @@ Status Coordinator::Wait() {
   query_profile_->AddInfoString(
       "DML Stats", dml_exec_state_.OutputPartitionStats("\n"));
   if (parent_request_state_->otel_trace_query()) {
-    parent_request_state_->otel_span_manager()->AddChildSpanEvent("LastRowFetched");
+    parent_request_state_->otel_trace_manager()->AddChildSpanEvent("LastRowFetched");
   }
   return Status::OK();
 }
@@ -1063,7 +1093,7 @@ Status Coordinator::GetNext(QueryResultSet* results, int max_rows, bool* eos,
     query_events_->MarkEvent(Coordinator::PROFILE_EVENT_LABEL_FIRST_ROW_FETCHED);
     first_row_fetched_ = true;
     if (parent_request_state_->otel_trace_query()) {
-      parent_request_state_->otel_span_manager()->AddChildSpanEvent("FirstRowFetched");
+      parent_request_state_->otel_trace_manager()->AddChildSpanEvent("FirstRowFetched");
     }
   }
   RETURN_IF_ERROR(UpdateExecState(
@@ -1126,6 +1156,11 @@ Status Coordinator::UpdateBackendExecStatus(const ReportExecStatusRequestPB& req
   if (backend_state->ApplyExecStatusReport(request, thrift_profiles, &exec_summary_,
           &scan_progress_, &query_progress_, &dml_exec_state_, &aux_error_info,
           fragment_stats_)) {
+    // Merge effective filter targets from backend report
+    for (const EffectiveFilterTargetPB& target : request.effective_filter_targets()) {
+      effective_filter_targets_[target.filter_id()].insert(target.scan_node_id());
+    }
+
     // This backend execution has completed.
     if (VLOG_QUERY_IS_ON) {
       // Don't log backend completion if the query has already been cancelled.
@@ -1375,6 +1410,8 @@ void Coordinator::ComputeQuerySummary() {
 
   stringstream mem_info, cpu_user_info, cpu_system_info, bytes_read_info;
   ResourceUtilization total_utilization;
+  BackendMachineInfoAggregator machine_info_aggregator;
+
   for (BackendState* backend_state: backend_states_) {
     ResourceUtilization utilization = backend_state->GetResourceUtilization();
     total_utilization.Merge(utilization);
@@ -1390,6 +1427,10 @@ void Coordinator::ComputeQuerySummary() {
     cpu_system_info << network_address << "("
                     << PrettyPrinter::Print(utilization.cpu_sys_ns, TUnit::TIME_NS)
                     << ") ";
+
+    // Aggregate machine information.
+    DCHECK(backend_state->exec_params().has_machine_info());
+    machine_info_aggregator.Merge(backend_state->exec_params().machine_info());
   }
 
   // The definitions of these counters are in the top of this file.
@@ -1430,6 +1471,27 @@ void Coordinator::ComputeQuerySummary() {
   query_profile_->AddInfoString("Per Node Bytes Read", bytes_read_info.str());
   query_profile_->AddInfoString("Per Node User Time", cpu_user_info.str());
   query_profile_->AddInfoString("Per Node System Time", cpu_system_info.str());
+
+  // Add aggregated machine information
+  if (machine_info_aggregator.HasData()) {
+    string cpu_summary = machine_info_aggregator.GetCpuSummary();
+    if (!cpu_summary.empty()) {
+      query_profile_->AddInfoString("Backend CPU Info", cpu_summary);
+    }
+
+    string os_summary = machine_info_aggregator.GetOsSummary();
+    if (!os_summary.empty()) {
+      query_profile_->AddInfoString("Backend OS Info", os_summary);
+    }
+  }
+
+  // Update the final filter table.
+  {
+    lock_guard<shared_mutex> lock(filter_routing_table_->lock);
+    if (filter_routing_table_->num_filters() > 0) {
+      query_profile_->AddInfoString("Final filter table", FilterDebugString());
+    }
+  }
 }
 
 string Coordinator::GetErrorLog() {
@@ -1444,9 +1506,6 @@ string Coordinator::GetErrorLog() {
 
 void Coordinator::ReleaseExecResources() {
   lock_guard<shared_mutex> lock(filter_routing_table_->lock); // Exclusive lock.
-  if (filter_routing_table_->num_filters() > 0) {
-    query_profile_->AddInfoString("Final filter table", FilterDebugString());
-  }
 
   for (auto& filter : filter_routing_table_->id_to_filter) {
     unique_lock<SpinLock> l(filter.second.lock());
@@ -1483,7 +1542,7 @@ void Coordinator::ReleaseQueryAdmissionControlResources() {
       ComputeQueryResourceUtilization().peak_per_host_mem_consumption);
   query_events_->MarkEvent("Released admission control resources");
   if (parent_request_state_->otel_trace_query()) {
-    parent_request_state_->otel_span_manager()->AddChildSpanEvent(
+    parent_request_state_->otel_trace_manager()->AddChildSpanEvent(
         "ReleasedAdmissionControlResources");
   }
 }
@@ -1793,9 +1852,38 @@ string Coordinator::FilterState::DebugString() const {
   return ss.str();
 }
 
+void Coordinator::MarkCancelledNodes(TExecSummary* exec_summary) {
+  if (!exec_summary->__isset.nodes) return;
+
+  for (TPlanNodeExecSummary& node : exec_summary->nodes) {
+    if (!node.__isset.exec_stats || node.exec_stats.empty()) continue;
+    // Skip data sinks
+    if (node.node_id == SINK_NODE_ID) continue;
+
+    // Check if any instance didn't complete execution
+    bool has_cancelled_instance = false;
+    for (const TExecStats& stat : node.exec_stats) {
+      if (stat.__isset.last_batch_returned && !stat.last_batch_returned) {
+        has_cancelled_instance = true;
+        break;
+      }
+    }
+    // Append a "CANCELLED" marker which will be shown in the Detail column in the
+    // ExecSummary table.
+    if (has_cancelled_instance) {
+      if (node.label_detail.empty()) {
+        node.label_detail = "CANCELLED";
+      } else {
+        node.label_detail += ", CANCELLED";
+      }
+    }
+  }
+}
+
 void Coordinator::GetTExecSummary(TExecSummary* exec_summary) {
   lock_guard<SpinLock> l(exec_summary_.lock);
   *exec_summary = exec_summary_.thrift_exec_summary;
+  if (!IsExecuting()) MarkCancelledNodes(exec_summary);
 }
 
 MemTracker* Coordinator::query_mem_tracker() const {
@@ -1847,4 +1935,50 @@ const TFinalizeParams* Coordinator::finalize_params() const {
 bool Coordinator::IsExecuting() {
   ExecState current_state = exec_state_.Load();
   return current_state == ExecState::EXECUTING;
+}
+
+void Coordinator::ExecQueryRpcStats::SetSharedTQueryCtxSize(
+    int64_t tqueryctx_size, int64_t descriptor_table_size) {
+  tqueryctx_size_ = tqueryctx_size;
+  descriptor_table_size_ = descriptor_table_size;
+}
+
+void Coordinator::ExecQueryRpcStats::ReportRpcSize(int64_t size) {
+  execquery_rpc_sizes_->UpdateCounter(size);
+}
+
+void Coordinator::ExecQueryRpcStats::ReportRpcSizeWithWarning(int64_t size,
+    string&& warning_message) {
+  ReportRpcSize(size);
+  rpcs_above_warning_threshold_++;
+  if (largest_rpc_warnings_.size() >= MAX_EXEC_RPC_WARNINGS) {
+    // Compare to the smallest element and replace if bigger
+    auto smallest = largest_rpc_warnings_.begin();
+    if (smallest->first > size) return;
+    largest_rpc_warnings_.erase(smallest);
+  }
+  largest_rpc_warnings_.emplace(size, warning_message);
+}
+
+void Coordinator::ExecQueryRpcStats::PrintWarnings() {
+  if (rpcs_above_warning_threshold_ == 0) return;
+  LOG(WARNING) << "ExecQueryFInstances RPCs for " << rpcs_above_warning_threshold_
+      << " out of " << execquery_rpc_sizes_->TotalNumValues()
+      << " exceed the warning threshold of "
+      << PrettyPrinter::Print(FLAGS_large_execquery_rpc_threshold_bytes, TUnit::BYTES)
+      << ". Average RPC size: "
+      << PrettyPrinter::Print(execquery_rpc_sizes_->value(), TUnit::BYTES)
+      << " Shared TQueryCtx: " << PrettyPrinter::Print(tqueryctx_size_, TUnit::BYTES)
+      << " (" << PrettyPrinter::Print(descriptor_table_size_, TUnit::BYTES)
+      << " from descriptor table)";
+  LOG(WARNING) << "Additional information about the " << largest_rpc_warnings_.size()
+      << " largest RPCs:";
+  // Print the warnings from largest to smallest using a reverse iterator
+  DCHECK_LE(largest_rpc_warnings_.size(), MAX_EXEC_RPC_WARNINGS);
+  for (auto it = largest_rpc_warnings_.crbegin();
+       it != largest_rpc_warnings_.crend(); ++it) {
+    LOG(WARNING) << it->second;
+  }
+  // We no longer need the warnings structure, so free the memory.
+  largest_rpc_warnings_.clear();
 }

@@ -353,6 +353,18 @@ class ImpalaServer : public ImpalaServiceIf,
   virtual void RenewDelegationToken(
       apache::hive::service::cli::thrift::TRenewDelegationTokenResp& return_val,
       const apache::hive::service::cli::thrift::TRenewDelegationTokenReq& req);
+  virtual void GetQueryId(
+      apache::hive::service::cli::thrift::TGetQueryIdResp& return_val,
+      const apache::hive::service::cli::thrift::TGetQueryIdReq& request);
+  virtual void SetClientInfo(
+      apache::hive::service::cli::thrift::TSetClientInfoResp& return_val,
+      const apache::hive::service::cli::thrift::TSetClientInfoReq& request);
+  virtual void UploadData(
+      apache::hive::service::cli::thrift::TUploadDataResp& return_val,
+      const apache::hive::service::cli::thrift::TUploadDataReq& request);
+  virtual void DownloadData(
+      apache::hive::service::cli::thrift::TDownloadDataResp& return_val,
+      const apache::hive::service::cli::thrift::TDownloadDataReq& request);
 
   // Extensions to HS2 implemented by ImpalaHiveServer2Service.
 
@@ -570,6 +582,10 @@ class ImpalaServer : public ImpalaServiceIf,
   void GetAllConnectionContexts(
       ThriftServer::ConnectionContextList* connection_contexts);
 
+  /// If OpenTelemetry query tracing is enabled, specifies if a query should have a trace
+  /// generated for it.
+  void DoTraceQuery(const TUniqueId& query_id, bool do_trace);
+
   // Mapping between query option names and levels
   QueryOptionLevels query_option_levels_;
 
@@ -626,6 +642,10 @@ class ImpalaServer : public ImpalaServiceIf,
     /// If using hs2-http protocol, this is the origin of the session
     /// as recorded in the X-Forwarded-For http message header.
     std::string http_origin;
+
+    /// If using hs2-http protocol, this is the request ID from the
+    /// X-Request-Id http message header.
+    std::string http_request_id;
 
     /// Protects all fields below. See "Locking" in the class comment for lock
     /// acquisition order.
@@ -1256,6 +1276,9 @@ class ImpalaServer : public ImpalaServiceIf,
 
   /// Random `impala::TUniqueID` generator. Use wherever a new `TUniqueId` is needed.
   TUniqueId RandomUniqueID();
+
+  /// Stores the execution stats for the given query into the HBO cache.
+  Status StoreExecutionStats(const QueryHandle& query_handle);
 
   /// Logger for writing encoded query profiles, one per line with the following format:
   /// <ms-since-epoch> <query-id> <thrift query profile URL encoded and gzipped>

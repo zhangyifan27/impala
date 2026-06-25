@@ -223,7 +223,7 @@ if [ $CREATE_RANGER_POLICY_DB -eq 1 ]; then
   createdb -U hiveuser "${RANGER_POLICY_DB}"
   pushd "${RANGER_HOME}"
   generate_config "${RANGER_TEST_CONF_DIR}/install.properties.template" install.properties
-  python ./db_setup.py
+  python3 ./db_setup.py
   popd
 fi
 
@@ -311,7 +311,7 @@ else
   # IMPALA-8261: Running this script should not fail when FE has not been built.
   MAVEN_URL="https://repo.maven.apache.org/maven2/org/postgresql/postgresql"
   JDBC_JAR="postgresql-${IMPALA_POSTGRES_JDBC_DRIVER_VERSION}.jar"
-  wget -P "${RANGER_SERVER_LIB_DIR}" \
+  wget -nv -P "${RANGER_SERVER_LIB_DIR}" \
     "${MAVEN_URL}/${IMPALA_POSTGRES_JDBC_DRIVER_VERSION}/${JDBC_JAR}"
 fi
 

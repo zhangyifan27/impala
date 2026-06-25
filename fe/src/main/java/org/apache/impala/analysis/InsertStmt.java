@@ -344,6 +344,7 @@ public class InsertStmt extends DmlStatementBase {
       List<Column> tableColumns = table_.getColumns();
       for (int i = numClusteringCols; i < tableColumns.size(); ++i) {
         Column c = tableColumns.get(i);
+        if (c.isHidden()) continue;
         // Omit auto-incrementing column for Kudu table since the values of the column
         // will be assigned by Kudu engine.
         if (c instanceof KuduColumn && ((KuduColumn)c).isAutoIncrementing()) continue;
@@ -364,6 +365,11 @@ public class InsertStmt extends DmlStatementBase {
       if (column == null) {
         throw new AnalysisException(
             "Unknown column '" + columnName + "' in column permutation");
+      }
+      if (column.isHidden()) {
+        throw new AnalysisException(
+            "Column '" + columnName + "' in column permutation is hidden and cannot be " +
+                "targeted for insert");
       }
 
       if (!mentionedColumnNames.add(column.getName())) {
@@ -716,9 +722,9 @@ public class InsertStmt extends DmlStatementBase {
   private void checkColumnCoverage(List<Column> selectExprTargetColumns,
       Set<String> mentionedColumnNames, int numSelectListExprs,
       int numStaticPartitionExprs) throws AnalysisException {
+    int colCount = table_.getColumnsInHiveOrder().size();
     // Check that all required cols are mentioned by the permutation and partition clauses
-    if (selectExprTargetColumns.size() + numStaticPartitionExprs !=
-        table_.getColumns().size()) {
+    if (selectExprTargetColumns.size() + numStaticPartitionExprs != colCount) {
       // We've already ruled out too many columns in the permutation and partition clauses
       // by checking that there are no duplicates and that every column mentioned actually
       // exists. So all columns aren't mentioned in the query.
@@ -747,7 +753,7 @@ public class InsertStmt extends DmlStatementBase {
         throw new AnalysisException(String.format(
             "Target table '%s' has %s columns (%s) than the SELECT / VALUES clause %s" +
             " (%s)", table_.getFullName(), comparator,
-            table_.getColumns().size(), partitionClause, totalColumnsMentioned));
+            colCount, partitionClause, totalColumnsMentioned));
       } else {
         String partitionPrefix =
             (partitionKeyValues_ == null) ? "mentions" : "and PARTITION clause mention";
@@ -993,16 +999,17 @@ public class InsertStmt extends DmlStatementBase {
           } else {
             // Unmentioned non-clustering columns get NULL literals with the appropriate
             // target type because Parquet cannot handle NULL_TYPE (IMPALA-617).
-            NullLiteral nullExpr = NullLiteral.create(tblColumn.getType());
-            resultExprs_.add(nullExpr);
+            // For Iceberg tables, use write-default if available.
+            Expr defaultExpr = getDefaultExpr(tblColumn);
+            resultExprs_.add(defaultExpr);
             // In the case of INSERT INTO iceberg_tbl (col_a, col_b, ...), if the
             // partition columns are not in the columnPermutation_, we should fill it
-            // with NullLiteral to partitionKeyExprs_ (IMPALA-11408).
+            // with default value or NullLiteral to partitionKeyExprs_ (IMPALA-11408).
             if (isIcebergTarget() && !CollectionUtils.isEmpty(columnPermutation_)
                 && icebergPartSpec != null) {
               IcebergColumn targetColumn = (IcebergColumn) tblColumn;
               if (IcebergUtil.isPartitionColumn(targetColumn, icebergPartSpec)) {
-                partitionKeyExprs_.add(nullExpr);
+                partitionKeyExprs_.add(defaultExpr);
                 partitionColPos_.add(targetColumn.getPosition());
               }
             }
@@ -1146,6 +1153,8 @@ public class InsertStmt extends DmlStatementBase {
   public boolean isTargetTableKuduTable() { return (table_ instanceof FeKuduTable); }
   public void setWriteId(long writeId) { this.writeId_ = writeId; }
   public boolean isOverwrite() { return overwrite_; }
+  public boolean isUpsert() { return isUpsert_; }
+
   @Override
   public TSortingOrder getSortingOrder() { return sortingOrder_; }
 
@@ -1265,5 +1274,17 @@ public class InsertStmt extends DmlStatementBase {
     if (withClause_ != null) hasChange = withClause_.resolveTableMask(analyzer);
     if (queryStmt_ != null) hasChange |= queryStmt_.resolveTableMask(analyzer);
     return hasChange;
+  }
+
+  /**
+   * Returns the default expression for an unmentioned column in an INSERT statement.
+   * For Iceberg tables, attempts to use the write-default value from metadata.
+   * Falls back to NULL if no write-default is available.
+   */
+  private Expr getDefaultExpr(Column tblColumn) throws AnalysisException {
+    if (isIcebergTarget()) {
+      return IcebergUtil.resolveWriteDefault(tblColumn);
+    }
+    return NullLiteral.create(tblColumn.getType());
   }
 }

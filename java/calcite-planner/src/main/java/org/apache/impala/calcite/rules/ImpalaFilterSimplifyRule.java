@@ -24,7 +24,6 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexExecutor;
 import org.apache.calcite.rex.RexNode;
 import org.apache.impala.calcite.operators.ImpalaRexSimplify;
-import org.apache.impala.calcite.operators.ImpalaRexUtil;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 
@@ -53,7 +52,7 @@ public class ImpalaFilterSimplifyRule extends RelOptRule {
     RexNode condition = filter.getCondition();
     RexExecutor executor = simplifier_.getRexExecutor();
 
-    RexNode newCondition = simplifier_.simplify(condition);
+    RexNode newCondition = simplifier_.simplify(condition, true);
     List<RexNode> reducedExprs = new ArrayList<>();
     executor.reduce(rexBuilder, ImmutableList.of(newCondition), reducedExprs);
     Preconditions.checkState(reducedExprs.size() == 1);

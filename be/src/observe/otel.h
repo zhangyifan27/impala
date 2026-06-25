@@ -19,7 +19,6 @@
 
 #include <memory>
 #include <string>
-#include <string_view>
 
 #include <opentelemetry/exporters/otlp/otlp_http_exporter_options.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_options.h>
@@ -27,13 +26,10 @@
 #include <opentelemetry/sdk/trace/processor.h>
 
 #include "gen-cpp/Query_types.h"
-#include "observe/span-manager.h"
+#include "observe/otel-trace-manager.h"
 #include "service/client-request-state.h"
 
 namespace impala {
-
-// Version of the spec for representing Impala queries as OpenTelemetry traces.
-const std::string SCOPE_SPAN_SPEC_VERSION = "1.0.0";
 
 // Constants representing the supported OpenTelemetry exporters.
 const std::string OTEL_EXPORTER_OTLP_HTTP = "otlp_http";
@@ -43,10 +39,12 @@ const std::string OTEL_EXPORTER_FILE = "file";
 const std::string SPAN_PROCESSOR_SIMPLE = "simple";
 const std::string SPAN_PROCESSOR_BATCH = "batch";
 
-// Returns true if an OpenTelemetry trace needs to be created for the given SQL query.
-// The sql string_view will be trimmed of leading whitespace and comments.
-bool should_otel_trace_query(std::string_view sql,
-    const TSessionType::type& session_type);
+// Determines if an OpenTelemetry trace needs to be created based on the session type
+// and HS2 metadata operation flag in the client request. If the session type is BEESWAX
+// or if the client request is an HS2 metadata operation, then false is returned.
+// Otherwise, true is returned.
+bool should_otel_trace_query(const TSessionType::type& session_type,
+    const TClientRequest& client_request);
 
 // Initializes the OpenTelemetry tracer with the configuration defined in the coordinator
 // startup flags (see otel-flags.cc and otel-flags-trace.cc for the list). Does not verify
@@ -56,8 +54,8 @@ void init_otel_tracer();
 // Force flushes any buffered spans and shuts down the OpenTelemetry tracer.
 void shutdown_otel_tracer();
 
-// Builds a SpanManager instance for the given query.
-std::shared_ptr<SpanManager> build_span_manager(ClientRequestState*);
+// Builds an OtelTraceManager instance for the given query.
+std::shared_ptr<OtelTraceManager> build_otel_trace_manager(ClientRequestState*);
 
 namespace test {
 // Testing helper function to provide access to the static otel_tls_enabled() function.

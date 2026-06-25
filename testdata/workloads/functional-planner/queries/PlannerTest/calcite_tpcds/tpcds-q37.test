@@ -19,6 +19,27 @@ select  i_item_id
 ---- PLAN
 Max Per-Host Resource Reservation: Memory=73.19MB Threads=1
 Per-Host Resource Estimates: Memory=5.26GB
+ImpalaSortRel(sort0=[$0], dir0=[ASC], fetch=[100:TINYINT])
+  ImpalaAggRel(group=[{0, 1, 2}])
+    ImpalaProjectRel(I_ITEM_ID=[$5], I_ITEM_DESC=[$6], I_CURRENT_PRICE=[$7])
+      ImpalaJoinRel(condition=[=($0, $4)], joinType=[inner])
+        ImpalaJoinRel(condition=[=($2, $1)], joinType=[inner])
+          ImpalaProjectRel(inv_item_sk=[$0], inv_date_sk=[$2])
+            ImpalaProjectRel(inv_item_sk=[$0], inv_quantity_on_hand=[$2], inv_date_sk=[$3])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[100..500]]), IS NOT NULL($0), IS NOT NULL($3))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, inventory]])
+          ImpalaProjectRel(d_date_sk=[$0])
+            ImpalaProjectRel(d_date_sk=[$0], d_date=[$2])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[2001-01-20:DATE..2001-03-21:DATE]]:DATE), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, date_dim]])
+        ImpalaJoinRel(condition=[=($0, $1)], joinType=[inner])
+          ImpalaProjectRel(cs_item_sk=[$14])
+            ImpalaFilterRel(condition=[IS NOT NULL($14)])
+              ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, catalog_sales]])
+          ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$2], i_current_price=[$3])
+            ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$4], i_current_price=[$5], i_manufact_id=[$13])
+              ImpalaFilterRel(condition=[AND(SEARCH($5, Sarg[[35.00:DECIMAL(7, 2)..65.00:DECIMAL(7, 2)]]:DECIMAL(7, 2)), SEARCH($13, Sarg[715, 861, 928, 942]), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, item]])
 F00:PLAN FRAGMENT [UNPARTITIONED] hosts=1 instances=1
 |  Per-Instance Resources: mem-estimate=5.26GB mem-reservation=73.19MB thread-reservation=1 runtime-filters-memory=3.00MB
 |  max-parallelism=1 segment-costs=[879026203, 3746309, 300]
@@ -56,13 +77,13 @@ PLAN-ROOT SINK
 |  |
 |  |--04:SCAN HDFS [tpcds_partitioned_parquet_snap.item]
 |  |     HDFS partitions=1/1 files=1 size=33.54MB
-|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     stored statistics:
 |  |       table: rows=360.00K size=33.54MB
 |  |       columns: all
 |  |     extrapolated-rows=disabled max-scan-range-rows=101.54K
-|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0))
-|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2))
+|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     mem-estimate=16.00MB mem-reservation=512.00KB thread-reservation=0
 |  |     tuple-ids=6 row-size=153B cardinality=476 cost=707123
 |  |     in pipelines: 04(GETNEXT)
@@ -120,6 +141,27 @@ PLAN-ROOT SINK
 ---- DISTRIBUTEDPLAN
 Max Per-Host Resource Reservation: Memory=348.31MB Threads=25
 Per-Host Resource Estimates: Memory=2.32GB
+ImpalaSortRel(sort0=[$0], dir0=[ASC], fetch=[100:TINYINT])
+  ImpalaAggRel(group=[{0, 1, 2}])
+    ImpalaProjectRel(I_ITEM_ID=[$5], I_ITEM_DESC=[$6], I_CURRENT_PRICE=[$7])
+      ImpalaJoinRel(condition=[=($0, $4)], joinType=[inner])
+        ImpalaJoinRel(condition=[=($2, $1)], joinType=[inner])
+          ImpalaProjectRel(inv_item_sk=[$0], inv_date_sk=[$2])
+            ImpalaProjectRel(inv_item_sk=[$0], inv_quantity_on_hand=[$2], inv_date_sk=[$3])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[100..500]]), IS NOT NULL($0), IS NOT NULL($3))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, inventory]])
+          ImpalaProjectRel(d_date_sk=[$0])
+            ImpalaProjectRel(d_date_sk=[$0], d_date=[$2])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[2001-01-20:DATE..2001-03-21:DATE]]:DATE), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, date_dim]])
+        ImpalaJoinRel(condition=[=($0, $1)], joinType=[inner])
+          ImpalaProjectRel(cs_item_sk=[$14])
+            ImpalaFilterRel(condition=[IS NOT NULL($14)])
+              ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, catalog_sales]])
+          ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$2], i_current_price=[$3])
+            ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$4], i_current_price=[$5], i_manufact_id=[$13])
+              ImpalaFilterRel(condition=[AND(SEARCH($5, Sarg[[35.00:DECIMAL(7, 2)..65.00:DECIMAL(7, 2)]]:DECIMAL(7, 2)), SEARCH($13, Sarg[715, 861, 928, 942]), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, item]])
 F06:PLAN FRAGMENT [UNPARTITIONED] hosts=1 instances=1
 |  Per-Instance Resources: mem-estimate=4.14MB mem-reservation=4.00MB thread-reservation=1
 |  max-parallelism=1 segment-costs=[354] cpu-comparison-result=101 [max(1 (self) vs 101 (sum children))]
@@ -216,13 +258,13 @@ max-parallelism=40 segment-costs=[389806012, 385740738] cpu-comparison-result=10
 |  |  max-parallelism=4 segment-costs=[707329]
 |  |  04:SCAN HDFS [tpcds_partitioned_parquet_snap.item, RANDOM]
 |  |     HDFS partitions=1/1 files=1 size=33.54MB
-|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     stored statistics:
 |  |       table: rows=360.00K size=33.54MB
 |  |       columns: all
 |  |     extrapolated-rows=disabled max-scan-range-rows=101.54K
-|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0))
-|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2))
+|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     mem-estimate=16.00MB mem-reservation=512.00KB thread-reservation=0
 |  |     tuple-ids=6 row-size=153B cardinality=476 cost=707123
 |  |     in pipelines: 04(GETNEXT)
@@ -306,6 +348,27 @@ max-parallelism=60 segment-costs=[550587747]
 ---- PARALLELPLANS
 Max Per-Host Resource Reservation: Memory=348.31MB Threads=25
 Per-Host Resource Estimates: Memory=2.32GB
+ImpalaSortRel(sort0=[$0], dir0=[ASC], fetch=[100:TINYINT])
+  ImpalaAggRel(group=[{0, 1, 2}])
+    ImpalaProjectRel(I_ITEM_ID=[$5], I_ITEM_DESC=[$6], I_CURRENT_PRICE=[$7])
+      ImpalaJoinRel(condition=[=($0, $4)], joinType=[inner])
+        ImpalaJoinRel(condition=[=($2, $1)], joinType=[inner])
+          ImpalaProjectRel(inv_item_sk=[$0], inv_date_sk=[$2])
+            ImpalaProjectRel(inv_item_sk=[$0], inv_quantity_on_hand=[$2], inv_date_sk=[$3])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[100..500]]), IS NOT NULL($0), IS NOT NULL($3))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, inventory]])
+          ImpalaProjectRel(d_date_sk=[$0])
+            ImpalaProjectRel(d_date_sk=[$0], d_date=[$2])
+              ImpalaFilterRel(condition=[AND(SEARCH($2, Sarg[[2001-01-20:DATE..2001-03-21:DATE]]:DATE), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, date_dim]])
+        ImpalaJoinRel(condition=[=($0, $1)], joinType=[inner])
+          ImpalaProjectRel(cs_item_sk=[$14])
+            ImpalaFilterRel(condition=[IS NOT NULL($14)])
+              ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, catalog_sales]])
+          ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$2], i_current_price=[$3])
+            ImpalaProjectRel(i_item_sk=[$0], i_item_id=[$1], i_item_desc=[$4], i_current_price=[$5], i_manufact_id=[$13])
+              ImpalaFilterRel(condition=[AND(SEARCH($5, Sarg[[35.00:DECIMAL(7, 2)..65.00:DECIMAL(7, 2)]]:DECIMAL(7, 2)), SEARCH($13, Sarg[715, 861, 928, 942]), IS NOT NULL($0))])
+                ImpalaHdfsScanRel(table=[[tpcds_partitioned_parquet_snap, item]])
 F06:PLAN FRAGMENT [UNPARTITIONED] hosts=1 instances=1
 |  Per-Instance Resources: mem-estimate=4.14MB mem-reservation=4.00MB thread-reservation=1
 |  max-parallelism=1 segment-costs=[354] cpu-comparison-result=101 [max(1 (self) vs 101 (sum children))]
@@ -402,13 +465,13 @@ max-parallelism=40 segment-costs=[389806012, 385740738] cpu-comparison-result=10
 |  |  max-parallelism=4 segment-costs=[707329]
 |  |  04:SCAN HDFS [tpcds_partitioned_parquet_snap.item, RANDOM]
 |  |     HDFS partitions=1/1 files=1 size=33.54MB
-|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     stored statistics:
 |  |       table: rows=360.00K size=33.54MB
 |  |       columns: all
 |  |     extrapolated-rows=disabled max-scan-range-rows=101.54K
-|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0))
-|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35 AS DECIMAL(5,0)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
+|  |     parquet statistics predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2))
+|  |     parquet dictionary predicates: tpcds_partitioned_parquet_snap.item.i_manufact_id IN (CAST(715 AS INT), CAST(861 AS INT), CAST(928 AS INT), CAST(942 AS INT)), tpcds_partitioned_parquet_snap.item.i_current_price <= CAST(65.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_current_price >= CAST(35.00 AS DECIMAL(7,2)), tpcds_partitioned_parquet_snap.item.i_item_sk IS NOT NULL
 |  |     mem-estimate=16.00MB mem-reservation=512.00KB thread-reservation=0
 |  |     tuple-ids=6 row-size=153B cardinality=476 cost=707123
 |  |     in pipelines: 04(GETNEXT)

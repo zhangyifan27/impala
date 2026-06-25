@@ -21,11 +21,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.lang3.NotImplementedException;
 import org.apache.iceberg.Table;
 import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.catalog.CatalogObject.ThriftObjectType;
 import org.apache.impala.thrift.TCompressionCodec;
+import org.apache.impala.thrift.THdfsFileFormat;
 import org.apache.impala.thrift.THdfsTable;
 import org.apache.impala.thrift.TIcebergCatalog;
 import org.apache.impala.thrift.TIcebergFileFormat;
@@ -86,6 +86,15 @@ public abstract class IcebergDeleteTable extends VirtualTable implements FeIcebe
       TTableDescriptor desc =
           baseTable_.toThriftDescriptor(tableId, referencedPartitions);
       desc.setColumnDescriptors(getTColumnDescriptors());
+      // PUFFIN format is used for deletion vectors, which are only supported in Iceberg
+      // format version 3 and above. For earlier format versions, we leave the file format
+      // unchanged to avoid misrepresenting the underlying file format.
+      if (baseTable_.getFormatVersion() > 2) {
+        desc.getHdfsTable().partitions.forEach((aLong, tHdfsPartition) ->
+            tHdfsPartition.hdfs_storage_descriptor.fileFormat = THdfsFileFormat.PUFFIN);
+        desc.getHdfsTable().prototype_partition.hdfs_storage_descriptor.fileFormat =
+            THdfsFileFormat.PUFFIN;
+      }
       if (desc.hdfsTable.isSetAvroSchema()) {
         desc.hdfsTable.setAvroSchema(AvroSchemaConverter.convertColumns(getColumns(),
             getFullName().replaceAll("-", "_")).toString());
@@ -95,7 +104,7 @@ public abstract class IcebergDeleteTable extends VirtualTable implements FeIcebe
 
     @Override
     public IcebergContentFileStore getContentFileStore() {
-      throw new NotImplementedException("This should never be called.");
+      return baseTable_.getContentFileStore();
     }
 
     @Override

@@ -109,7 +109,6 @@ DECLARE_bool(pull_table_types_and_comments);
 DECLARE_bool(enable_reload_events);
 DECLARE_string(geospatial_library);
 DECLARE_string(file_metadata_reload_properties);
-DECLARE_string(java_weigher);
 DECLARE_bool(enable_skipping_older_events);
 DECLARE_bool(enable_json_scanner);
 DECLARE_bool(iceberg_allow_datafiles_in_table_location_only);
@@ -136,6 +135,7 @@ DECLARE_int32(dbcp_data_source_idle_timeout_s);
 DECLARE_bool(enable_catalogd_ha);
 DECLARE_string(injected_group_members_debug_only);
 DECLARE_int32(hms_event_sync_sleep_interval_ms);
+DECLARE_int32(hms_event_catchup_threshold_s);
 DECLARE_int32(catalog_delete_log_ttl);
 DECLARE_bool(enable_hierarchical_event_processing);
 DECLARE_int32(num_db_event_executors);
@@ -149,6 +149,11 @@ DECLARE_string(warmup_tables_config_file);
 DECLARE_bool(keeps_warmup_tables_loaded);
 DECLARE_bool(truncate_external_tables_with_hms);
 DECLARE_bool(disable_hms_sync_by_default);
+DECLARE_bool(otel_trace_enabled);
+DECLARE_double(hbo_similarity_threshold);
+DECLARE_int32(hbo_max_runs_per_key);
+DECLARE_int64(hbo_in_memory_backend_cache_size_bytes);
+DECLARE_int32(unregistration_thread_pool_size);
 
 // HS2 SAML2.0 configuration
 // Defined here because TAG_FLAG caused issues in global-flags.cc
@@ -346,6 +351,15 @@ static bool ValidateNonnegativeDouble(const char* flagname, double value) {
   return false;
 }
 
+static bool ValidateHboSimilarityThreshold(const char* flagname, double value) {
+  if (0.0 <= value && value <= 1.0) {
+    return true;
+  }
+  LOG(ERROR) << Substitute(
+      "$0 must be in [0.0, 1.0], value $1 is invalid", flagname, value);
+  return false;
+}
+
 static bool ValidatePositiveInt64(const char* flagname, int64_t value) {
   if (0 < value) {
     return true;
@@ -368,6 +382,10 @@ DEFINE_validator(tuple_cache_cost_coefficient_write_bytes, &ValidateNonnegativeD
 DEFINE_validator(tuple_cache_cost_coefficient_write_rows, &ValidateNonnegativeDouble);
 DEFINE_validator(tuple_cache_cost_coefficient_read_bytes, &ValidateNonnegativeDouble);
 DEFINE_validator(tuple_cache_cost_coefficient_read_rows, &ValidateNonnegativeDouble);
+DEFINE_validator(hbo_similarity_threshold, &ValidateHboSimilarityThreshold);
+DEFINE_validator(hbo_max_runs_per_key, &ValidatePositiveInt32);
+DEFINE_validator(hbo_in_memory_backend_cache_size_bytes, &ValidatePositiveInt64);
+DEFINE_validator(unregistration_thread_pool_size, &ValidatePositiveInt32);
 
 Status GetConfigFromCommand(const string& flag_cmd, string& result) {
   result.clear();
@@ -527,7 +545,6 @@ Status PopulateThriftBackendGflags(TBackendGflags& cfg) {
   cfg.__set_file_metadata_reload_properties(FLAGS_file_metadata_reload_properties);
   cfg.__set_thrift_rpc_max_message_size(ThriftInternalRpcMaxMessageSize());
   cfg.__set_scan_range_cost_factor(FLAGS_scan_range_cost_factor);
-  cfg.__set_use_jamm_weigher(FLAGS_java_weigher == "jamm");
   cfg.__set_enable_skipping_older_events(FLAGS_enable_skipping_older_events);
   cfg.__set_enable_json_scanner(FLAGS_enable_json_scanner);
   cfg.__set_iceberg_allow_datafiles_in_table_location_only(
@@ -571,6 +588,7 @@ Status PopulateThriftBackendGflags(TBackendGflags& cfg) {
 #endif
   cfg.__set_enable_catalogd_ha(FLAGS_enable_catalogd_ha);
   cfg.__set_hms_event_sync_sleep_interval_ms(FLAGS_hms_event_sync_sleep_interval_ms);
+  cfg.__set_hms_event_catchup_threshold_s(FLAGS_hms_event_catchup_threshold_s);
   cfg.__set_catalog_delete_log_ttl(FLAGS_catalog_delete_log_ttl);
   cfg.__set_enable_hierarchical_event_processing(
       FLAGS_enable_hierarchical_event_processing);
@@ -598,6 +616,12 @@ Status PopulateThriftBackendGflags(TBackendGflags& cfg) {
   cfg.__set_min_jdbc_scan_cardinality(FLAGS_min_jdbc_scan_cardinality);
   cfg.__set_max_stmt_metadata_loader_threads(FLAGS_max_stmt_metadata_loader_threads);
   cfg.__set_disable_hms_sync_by_default(FLAGS_disable_hms_sync_by_default);
+  cfg.__set_otel_trace_enabled(FLAGS_otel_trace_enabled);
+  cfg.__set_hbo_similarity_threshold(FLAGS_hbo_similarity_threshold);
+  cfg.__set_hbo_max_runs_per_key(FLAGS_hbo_max_runs_per_key);
+  cfg.__set_hbo_in_memory_backend_cache_size_bytes(
+      FLAGS_hbo_in_memory_backend_cache_size_bytes);
+  cfg.__set_unregistration_thread_pool_size(FLAGS_unregistration_thread_pool_size);
   return Status::OK();
 }
 

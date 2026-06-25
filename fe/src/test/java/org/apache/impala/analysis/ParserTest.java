@@ -2262,6 +2262,9 @@ public class ParserTest extends FrontendTestBase {
       ParsesOk(String.format("CREATE %s Foo LOCATION '/hdfs_location'", kw));
       ParsesOk(String.format(
           "CREATE %s Foo COMMENT 'comment' LOCATION '/hdfs_location'", kw));
+      ParsesOk(String.format("CREATE %s Foo WITH DBPROPERTIES('k'='v')", kw));
+      ParsesOk(String.format(
+          "CREATE %s Foo WITH DBPROPERTIES('k1'='v1', 'k2'='v2')", kw));
 
       // Only string literals are supported
       ParserError(String.format("CREATE %s Foo COMMENT mytable", kw));
@@ -2271,9 +2274,26 @@ public class ParserTest extends FrontendTestBase {
       ParserError(String.format(
           "CREATE %s Foo LOCATION '/hdfs/location' COMMENT 'comment'", kw));
 
+      ParserError(String.format("CREATE %s Foo DBPROPERTIES('a'='b')", kw));
+      ParserError(String.format("CREATE %s Foo WITH DBPROPERTIES()", kw));
+      ParserError(String.format("CREATE %s Foo WITH DBPROPERTIES(a=)", kw));
+      ParserError(String.format("CREATE %s Foo WITH DBPROPERTIES('a'=b)", kw));
+
+      // WITH DBPROPERTIES needs to be *before* LOCATION
+      ParserError(String.format(
+          "CREATE %s Foo LOCATION '/hdfs/location' WITH DBPROPERTIES('a'='b')", kw));
+      ParsesOk(String.format(
+          "CREATE %s Foo WITH DBPROPERTIES('a'='b') LOCATION '/hdfs/location'", kw));
+
       ParserError(String.format("CREATE %s Foo COMMENT LOCATION '/hdfs_location'", kw));
       ParserError(String.format("CREATE %s Foo LOCATION", kw));
       ParserError(String.format("CREATE %s Foo LOCATION 'dfsd' 'dafdsf'", kw));
+
+      ParsesOk(String.format(
+          "CREATE %s Foo COMMENT 'comment' WITH DBPROPERTIES('a'='b')", kw));
+      ParsesOk(String.format(
+          "CREATE %s Foo COMMENT 'comment' WITH DBPROPERTIES('a'='b') " +
+          "LOCATION '/hdfs/location'", kw));
 
       ParserError(String.format("CREATE Foo"));
       ParserError(String.format("CREATE %s 'Foo'", kw));
@@ -3757,7 +3777,7 @@ public class ParserTest extends FrontendTestBase {
         "select c, b, c where a = 5\n" +
         "               ^\n" +
         "Encountered: WHERE\n" +
-        "Expected: AND, AS, BETWEEN, DIV, EXCEPT, FROM, ILIKE, IN, INTERSECT, " +
+        "Expected: AND, AS, BETWEEN, DIV, EXCEPT, FOR, FROM, ILIKE, IN, INTERSECT, " +
         "IREGEXP, IS, LIKE, LIMIT, ||, MINUS, NOT, OR, ORDER, REGEXP, RLIKE, UNION, " +
         "COMMA, IDENTIFIER\n" +
         "\n" +
@@ -3838,9 +3858,9 @@ public class ParserTest extends FrontendTestBase {
         "... b, c,c,c,c,c,c,c,c,c,a a a,c,c,c,c,c,c,c,cd,c,d,d,,c,...\n" +
         "                             ^\n" +
         "Encountered: IDENTIFIER\n" +
-        "Expected: CROSS, EXCEPT, FROM, FULL, GROUP, HAVING, INNER, INTERSECT, JOIN, " +
-        "LEFT, LIMIT, MINUS, OFFSET, ON, ORDER, RIGHT, STRAIGHT_JOIN, TABLESAMPLE, " +
-        "UNION, USING, WHERE, COMMA\n");
+        "Expected: CROSS, EXCEPT, FOR, FROM, FULL, GROUP, HAVING, INNER, INTERSECT, " +
+        "JOIN, LEFT, LIMIT, MINUS, OFFSET, ON, ORDER, RIGHT, STRAIGHT_JOIN, " +
+        "TABLESAMPLE, UNION, USING, WHERE, COMMA\n");
 
     // Long line: error close to the start
     ParserError("select a a a, b, c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,cd,c,d,d,,c, from t",
@@ -3848,9 +3868,9 @@ public class ParserTest extends FrontendTestBase {
         "select a a a, b, c,c,c,c,c,c,c,c,c,c,c,...\n" +
         "           ^\n" +
         "Encountered: IDENTIFIER\n" +
-        "Expected: CROSS, EXCEPT, FROM, FULL, GROUP, HAVING, INNER, INTERSECT, JOIN, " +
-        "LEFT, LIMIT, MINUS, OFFSET, ON, ORDER, RIGHT, STRAIGHT_JOIN, TABLESAMPLE, " +
-        "UNION, USING, WHERE, COMMA\n");
+        "Expected: CROSS, EXCEPT, FOR, FROM, FULL, GROUP, HAVING, INNER, INTERSECT, " +
+        "JOIN, LEFT, LIMIT, MINUS, OFFSET, ON, ORDER, RIGHT, STRAIGHT_JOIN, " +
+        "TABLESAMPLE, UNION, USING, WHERE, COMMA\n");
 
     // Long line: error close to the end
     ParserError("select a, b, c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,c,cd,c,d,d, ,c, from t",
@@ -4305,6 +4325,15 @@ public class ParserTest extends FrontendTestBase {
   }
 
   @Test
+  public void TestShowCurrentGroups() {
+    ParsesOk("SHOW CURRENT GROUPS");
+    ParserError("SHOW CURRENT GROUPS blah");
+    ParserError("SHOW CURRENT");
+    ParserError("SHOW CURRENT GROUP");
+    ParserError("SHOW GROUPS");
+  }
+
+  @Test
   public void TestShowGrantPrincipal() {
     for (String type: new String[]{"ROLE", "USER", "GROUP"}) {
       // Show all grants on a particular principal type.
@@ -4456,6 +4485,22 @@ public class ParserTest extends FrontendTestBase {
     ParserError("ALTER DATABASE db SET OWNER ROLE");
     ParserError("ALTER DATABASE SET OWNER ROLE foo");
     ParserError("ALTER DATABASE SET OWNER");
+  }
+
+  @Test
+  public void TestAlterDatabaseSetDbProperties() {
+    ParsesOk("ALTER DATABASE db SET DBPROPERTIES('a'='b')");
+    ParsesOk("ALTER DATABASE db SET DBPROPERTIES('a'='b', 'b'='c')");
+    ParsesOk("ALTER DATABASE db SET DBPROPERTIES('a'='b', 'b'='c', 'c'='d')");
+
+    ParserError("ALTER DATABASE db SET DBPROPERTIESS('a'='b')");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES()");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES('a')");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES('a'=)");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES('a'=b)");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES(a='b')");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES('a'='b' 'c'='d')");
+    ParserError("ALTER DATABASE db SET DBPROPERTIES('a'='b',)");
   }
 
   @Test

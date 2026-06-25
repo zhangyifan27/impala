@@ -15,10 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import pytest
-import re
 import threading
 import time
 
@@ -195,6 +192,7 @@ class TestConcurrentDdls(CustomClusterTestSuite):
         dump_server_stacktraces()
         assert False, "Timeout in thread run_ddls(%d)" % i
     stop = True
+    pool.terminate()
 
   @classmethod
   def is_transient_error(cls, err):

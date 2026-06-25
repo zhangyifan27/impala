@@ -147,7 +147,7 @@ Invalid Kudu read mode: 'bar'. Valid values are DEFAULT(0), READ_LATEST(1), READ
 ---- QUERY
 set default_file_format=bar
 ---- CATCH
-Invalid default file format: 'bar'. Valid values are TEXT(0), RC_FILE(1), SEQUENCE_FILE(2), AVRO(3), PARQUET(4), KUDU(5), ORC(6), HUDI_PARQUET(7), ICEBERG(8), JSON(9), JDBC(10), PAIMON(11).
+Invalid default file format: 'bar'. Valid values are TEXT(0), RC_FILE(1), SEQUENCE_FILE(2), AVRO(3), PARQUET(4), KUDU(5), ORC(6), HUDI_PARQUET(7), ICEBERG(8), JSON(9), JDBC(10), PAIMON(11), PUFFIN(12).
 ====
 ---- QUERY
 set default_transactional_type=bar
@@ -225,7 +225,7 @@ explain select count(distinct double_col) from functional.alltypesagg;
 '05:EXCHANGE [UNPARTITIONED]'
 '02:AGGREGATE'
 '04:AGGREGATE'
-'03:EXCHANGE [HASH(double_col)]'
+row_regex:.*03:EXCHANGE \[HASH\(.*double_col\)].*
 '01:AGGREGATE [STREAMING]'
 '00:SCAN $FILESYSTEM_NAME [functional.alltypesagg]'
 ====
@@ -238,7 +238,7 @@ explain select count(distinct double_col) from functional.alltypesagg;
 '05:EXCHANGE [UNPARTITIONED]'
 '02:AGGREGATE'
 '04:AGGREGATE'
-'03:EXCHANGE [HASH(double_col)]'
+row_regex:.*03:EXCHANGE \[HASH\(.*double_col\)].*
 '01:AGGREGATE [STREAMING]'
 '00:SCAN $FILESYSTEM_NAME [functional.alltypesagg]'
 ====
@@ -251,7 +251,7 @@ explain select count(distinct double_col) from functional.alltypesagg;
 '05:EXCHANGE [UNPARTITIONED]'
 '02:AGGREGATE'
 '04:AGGREGATE'
-'03:EXCHANGE [HASH(double_col)]'
+row_regex:.*03:EXCHANGE \[HASH\(.*double_col\)].*
 '01:AGGREGATE'
 '00:SCAN $FILESYSTEM_NAME [functional.alltypesagg]'
 ====
@@ -264,7 +264,7 @@ explain select count(distinct double_col) from functional.alltypesagg;
 '05:EXCHANGE [UNPARTITIONED]'
 '02:AGGREGATE'
 '04:AGGREGATE'
-'03:EXCHANGE [HASH(double_col)]'
+row_regex:.*03:EXCHANGE \[HASH\(.*double_col\)].*
 '01:AGGREGATE'
 '00:SCAN $FILESYSTEM_NAME [functional.alltypesagg]'
 ====

@@ -20,6 +20,8 @@ package org.apache.impala.catalog;
 import org.apache.impala.thrift.TColumn;
 import org.apache.impala.thrift.TColumnDescriptor;
 
+import com.google.common.base.MoreObjects;
+
 /**
  * Represents an Iceberg column.
  *
@@ -38,28 +40,58 @@ public class IcebergColumn extends Column {
   private final int fieldMapValueId_;
   // False for required Iceberg field, true for optional Iceberg field
   private final boolean isNullable_;
+  // Until only Iceberg columns can be hidden, we can keep this flag here.
+  private final boolean isHidden_;
+  // Iceberg V3 default values stored as JSON string representation
+  private final String initialDefault_;
+  private final String writeDefault_;
 
   public IcebergColumn(String name, Type type, String comment, int position,
       int fieldId, int fieldMapKeyId, int fieldMapValueId, boolean isNullable) {
+    this(name, type, comment, position, fieldId, fieldMapKeyId, fieldMapValueId,
+        isNullable, false);
+  }
+
+  public IcebergColumn(String name, Type type, String comment, int position,
+      int fieldId, int fieldMapKeyId, int fieldMapValueId, boolean isNullable,
+      boolean isHidden) {
+    this(name, type, comment, position, fieldId, fieldMapKeyId, fieldMapValueId,
+        isNullable, isHidden, null, null);
+  }
+
+  public IcebergColumn(String name, Type type, String comment, int position,
+      int fieldId, int fieldMapKeyId, int fieldMapValueId, boolean isNullable,
+      boolean isHidden, String initialDefault, String writeDefault) {
     super(name.toLowerCase(), type, comment, position);
     fieldId_ = fieldId;
     fieldMapKeyId_ = fieldMapKeyId;
     fieldMapValueId_ = fieldMapValueId;
     isNullable_ = isNullable;
+    isHidden_ = isHidden;
+    initialDefault_ = initialDefault;
+    writeDefault_ = writeDefault;
   }
 
   public static IcebergColumn cloneWithNullability(IcebergColumn source,
       boolean isNullable) {
     return new IcebergColumn(source.name_, source.type_, source.comment_,
-        source.position_, source.fieldId_, source.fieldMapKeyId_, source.fieldMapKeyId_,
-        isNullable);
+        source.position_, source.fieldId_, source.fieldMapKeyId_, source.fieldMapValueId_,
+        isNullable, source.isHidden_, source.initialDefault_, source.writeDefault_);
   }
 
   public int getFieldId() {
     return fieldId_;
   }
 
+  @Override
   public boolean isNullable() { return isNullable_; }
+
+  @Override
+  public boolean isHidden() { return isHidden_; }
+
+  public String getInitialDefault() { return initialDefault_; }
+
+  public String getWriteDefault() { return writeDefault_; }
 
   @Override
   public TColumn toThrift() {
@@ -69,6 +101,12 @@ public class IcebergColumn extends Column {
     tcol.setIceberg_field_map_key_id(fieldMapKeyId_);
     tcol.setIceberg_field_map_value_id(fieldMapValueId_);
     tcol.setIs_nullable(isNullable_);
+    if (initialDefault_ != null) {
+      tcol.setIceberg_initial_default(initialDefault_);
+    }
+    if (writeDefault_ != null) {
+      tcol.setIceberg_write_default(writeDefault_);
+    }
     return tcol;
   }
 
@@ -78,6 +116,20 @@ public class IcebergColumn extends Column {
     desc.setIcebergFieldId(fieldId_);
     desc.setIcebergFieldMapKeyId(fieldMapKeyId_);
     desc.setIcebergFieldMapValueId(fieldMapValueId_);
+    if (initialDefault_ != null) {
+      desc.setIcebergInitialDefault(initialDefault_);
+    }
     return desc;
+  }
+
+  @Override
+  protected MoreObjects.ToStringHelper toStringHelper() {
+    return super.toStringHelper()
+        .add("fieldId_", fieldId_)
+        .add("fieldMapKeyId_", fieldMapKeyId_)
+        .add("fieldMapValueId_", fieldMapValueId_)
+        .add("isNullable_", isNullable_)
+        .add("initialDefault_", initialDefault_)
+        .add("writeDefault_", writeDefault_);
   }
 }

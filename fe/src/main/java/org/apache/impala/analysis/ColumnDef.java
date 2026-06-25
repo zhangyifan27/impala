@@ -180,12 +180,11 @@ public class ColumnDef {
         || hasDefaultValue() || hasBlockSize();
   }
   public boolean hasIcebergOptions() {
-    return isNullabilitySet();
+    return isNullabilitySet() || hasDefaultValue();
   }
   // Returns true if the column has options that are not supported for Iceberg tables.
   public boolean hasIncompatibleIcebergOptions() {
-    return isPrimaryKey() || hasEncoding() || hasCompression() || hasDefaultValue()
-        || hasBlockSize();
+    return isPrimaryKey() || hasEncoding() || hasCompression() || hasBlockSize();
   }
   // Returns true if the column has options that are not supported for Kudu tables.
   public boolean hasIncompatibleKuduOptions() {
@@ -208,6 +207,26 @@ public class ColumnDef {
 
   public boolean hasDefaultValue() { return defaultValue_ != null; }
   public Expr getDefaultValue() { return defaultValue_; }
+
+  /**
+   * Returns the analyzed default literal. Must be called after analyze().
+   */
+  public LiteralExpr getAnalyzedDefaultLiteral() {
+    Preconditions.checkState(outputDefaultValue_ instanceof LiteralExpr);
+    return (LiteralExpr) outputDefaultValue_;
+  }
+
+  /**
+   * Returns the analyzed default as a string compatible with
+   * {@link LiteralExpr#createFromUnescapedStr} for Iceberg schema metadata.
+   */
+  public String getIcebergDefaultValueString() {
+    LiteralExpr lit = getAnalyzedDefaultLiteral();
+    if (lit instanceof StringLiteral) {
+      return ((StringLiteral) lit).getUnescapedValue();
+    }
+    return lit.getStringValue();
+  }
 
   public void setNullable(Boolean nullable) {
     isNullable_ = nullable;
@@ -293,7 +312,7 @@ public class ColumnDef {
       // Special case string literals in timestamp columns for convenience.
       if (defaultValLiteral.getType().isStringType() && type_.isTimestamp()) {
         // Add an explicit cast to TIMESTAMP
-        Expr e = new CastExpr(new TypeDef(Type.TIMESTAMP), defaultValLiteral);
+        Expr e = CastExpr.createExplicit(new TypeDef(Type.TIMESTAMP), defaultValLiteral);
         e.analyze(analyzer);
         defaultValLiteral = LiteralExpr.create(e, analyzer.getQueryCtx());
         Preconditions.checkNotNull(defaultValLiteral);

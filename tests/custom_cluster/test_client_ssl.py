@@ -16,7 +16,6 @@
 # under the License.
 #
 
-from __future__ import absolute_import, division, print_function
 import json
 import logging
 import os
@@ -31,7 +30,7 @@ import time
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
 from tests.common.impala_service import ImpaladService
-from tests.common.network import SKIP_SSL_MSG, REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12
+from tests.common.network import SKIP_SSL_MSG
 from tests.common.test_dimensions import create_client_protocol_dimension
 from tests.common.test_vector import BEESWAX
 from tests.shell.util import run_impala_shell_cmd, run_impala_shell_cmd_no_expect, \
@@ -40,9 +39,7 @@ from tests.shell.util import run_impala_shell_cmd, run_impala_shell_cmd_no_expec
 
 CERT_DIR = "%s/be/src/testutil" % os.environ['IMPALA_HOME']
 
-# Due to THRIFT-792, SSL errors are suppressed when using OpenSSL hostname verification.
-# This is the only option on Python 3.12+, using ssl.PROTOCOL_TLS_CLIENT.
-CERT_ERR = ["doesn't match", "certificate verify failed", "Could not connect"]
+CERT_ERR = ["doesn't match", "certificate verify failed"]
 
 
 class TestClientSsl(CustomClusterTestSuite):
@@ -78,12 +75,6 @@ class TestClientSsl(CustomClusterTestSuite):
               "--ssl_private_key={0}/server-key.pem "
               "--hostname=localhost " # Required to match hostname in certificate
               ).format(CERT_DIR)
-
-  @classmethod
-  def setup_class(cls):
-    if sys.version_info < REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12:
-      pytest.skip("Python version does not support tls 1.2")
-    super(TestClientSsl, cls).setup_class()
 
   @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(impalad_args=SSL_ARGS, statestored_args=SSL_ARGS,
@@ -141,8 +132,7 @@ class TestClientSsl(CustomClusterTestSuite):
   def add_test_dimensions(cls):
     super(TestClientSsl, cls).add_test_dimensions()
     # Limit the test dimensions to avoid long run times. This runs hs2 and hs2-http
-    # with only the dev shells (python2 and python3) for a total of up to 4
-    # dimensions.
+    # with only the python3 dev shell (2 total dimensions).
     cls.ImpalaTestMatrix.add_dimension(create_client_protocol_dimension())
     cls.ImpalaTestMatrix.add_dimension(
         create_impala_shell_executable_dimension(dev_only=True))
@@ -240,26 +230,29 @@ class TestClientSsl(CustomClusterTestSuite):
     return False
 
   def _verify_negative_cases(self, vector, ca_cert, host=""):
+    def run_shell(args, host=host):
+      """Run impala-shell after adding common args and expect failure"""
+      if host:
+        args.extend(["-i", host])
+      args.extend([ "-q", "select 1 + 2"])
+      return run_impala_shell_cmd(vector, args, expect_success=False)
+
     # Expect the shell to not start successfully if we connect to an endpoint that
     # doesn't match the certificate.
     invalid_host = "localhost" if host else "127.0.0.1"
-    args = ["--ssl", "-q", "select 1 + 2", "-i", invalid_host, "--ca_cert=%s" % ca_cert]
-    result = run_impala_shell_cmd(vector, args, expect_success=False)
+    result = run_shell(["--ssl", "--ca_cert=%s" % ca_cert], invalid_host)
     assert self._is_cert_error(result.stderr), result.stderr
 
     # Expect the shell to not start successfully if we point --ca_cert to an incorrect
     # certificate.
-    args = ["--ssl", "-q", "select 1 + 2",
-            "--ca_cert=%s/incorrect-commonname-cert.pem" % CERT_DIR]
-    if host:
-      args.extend(["-i", host])
-    run_impala_shell_cmd(vector, args, expect_success=False)
+    run_shell(["--ssl", "--ca_cert=%s/incorrect-commonname-cert.pem" % CERT_DIR])
 
     # Expect the shell to not start successfully if we don't specify the --ssl option
-    args = ["-q", "select 1 + 2"]
-    if host:
-      args.extend(["-i", host])
-    run_impala_shell_cmd(vector, args, expect_success=False)
+    run_shell([])
+
+    # Expect the shell to not start successfully with --verify_cert which uses
+    # default CA certs from OS while test certs are self signed.
+    run_shell(["--ssl", "--verify_cert"])
 
   def _validate_positive_cases(self, vector, ca_cert="", host=None):
     python3_10_version_re = re.compile(r"using Python 3\.1[0-9]")
@@ -291,28 +284,3 @@ class TestClientSsl(CustomClusterTestSuite):
       response = requests.get(url, verify="%s/server-cert.pem" % CERT_DIR)
       assert response.status_code == requests.codes.ok, url
 
-
-# Run when the python version is too low to support TLS 1.2, to check that impala-shell
-# returns the expected warning.
-class TestClientSslUnsupported(CustomClusterTestSuite):
-  @classmethod
-  def setup_class(cls):
-    if sys.version_info >= REQUIRED_MIN_PYTHON_VERSION_FOR_TLSV12:
-      pytest.skip("This test is only run with older versions of python")
-    super(TestClientSslUnsupported, cls).setup_class()
-
-  SSL_ARGS = ("--ssl_client_ca_certificate=%s/server-cert.pem "
-              "--ssl_server_certificate=%s/server-cert.pem "
-              "--ssl_private_key=%s/server-key.pem "
-              "--hostname=localhost "  # Required to match hostname in certificate
-              % (CERT_DIR, CERT_DIR, CERT_DIR))
-
-  @pytest.mark.execute_serially
-  @CustomClusterTestSuite.with_args(impalad_args=SSL_ARGS,
-                                    statestored_args=SSL_ARGS,
-                                    catalogd_args=SSL_ARGS)
-  @pytest.mark.skipif(SKIP_SSL_MSG != "", reason=SKIP_SSL_MSG)
-  def test_shell_warning(self, vector):
-    result = run_impala_shell_cmd_no_expect(vector, ["--ssl", "-q", "select 1 + 2"])
-    assert "Warning: TLSv1.2 is not supported for Python < 2.7.9" in result.stderr, \
-      result.stderr

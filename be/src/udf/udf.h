@@ -24,7 +24,9 @@
 
 #include <assert.h>
 #include <boost/cstdint.hpp>
+#include <ostream>
 #include <string.h>
+#include <vector>
 
 // Only use noexcept if the compiler supports C++11 (some system compilers may not
 // or may have it disabled by default).
@@ -109,6 +111,8 @@ class FunctionContext {
     TYPE_VARCHAR,
     // A fixed-size buffer, passed as a StringVal.
     TYPE_FIXED_UDA_INTERMEDIATE,
+    TYPE_ARRAY,
+    TYPE_MAP,
     TYPE_STRUCT
   };
 
@@ -122,6 +126,12 @@ class FunctionContext {
     /// Only valid if type is one of TYPE_FIXED_BUFFER, TYPE_FIXED_UDA_INTERMEDIATE or
     /// TYPE_VARCHAR.
     int len;
+
+    /// Only valid if type is one of TYPE_ARRAY, TYPE_MAP, or TYPE_STRUCT.
+    /// For TYPE_ARRAY: children[0] is the element type.
+    /// For TYPE_MAP: children[0] is the key type, children[1] is the value type.
+    /// For TYPE_STRUCT: children contains all field types.
+    std::vector<TypeDesc> children;
   };
 
   struct UniqueId {
@@ -721,6 +731,13 @@ struct StringVal : public AnyVal {
   static void AllocateStringValWithLenCheck(FunctionContext* ctx, uint64_t str_len,
       StringVal* res);
 };
+
+/// Prints the string contents using 'len' bytes from 'ptr'. The buffer is not required
+/// to be null-terminated. NULL strings are printed as "NULL".
+inline std::ostream& operator<<(std::ostream& os, const StringVal& val) {
+  if (val.is_null) return os << "NULL";
+  return os.write(reinterpret_cast<const char*>(val.ptr), val.len);
+}
 
 struct DecimalVal : public impala_udf::AnyVal {
   /// Decimal data is stored as an unscaled integer value. For example, the decimal 1.00

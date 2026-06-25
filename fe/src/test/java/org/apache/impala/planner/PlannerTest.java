@@ -217,6 +217,13 @@ public class PlannerTest extends PlannerTestBase {
   }
 
   @Test
+  public void testPivotClause() {
+    TQueryOptions options = defaultQueryOptions();
+    runPlannerTestFile("pivot-clause", options,
+        ImmutableSet.of(PlannerTestOption.VALIDATE_CARDINALITY));
+  }
+
+  @Test
   public void testAnalyticFns() {
     runPlannerTestFile("analytic-fns",
         ImmutableSet.of(PlannerTestOption.VALIDATE_CARDINALITY));
@@ -246,9 +253,9 @@ public class PlannerTest extends PlannerTestBase {
   }
 
   @Test
-    public void testJdbcParallel() {
-      runPlannerTestFile("jdbc-parallel");
-    }
+  public void testJdbcParallel() {
+    runPlannerTestFile("jdbc-parallel");
+  }
 
   /**
    * Test of HBase in the case of disabling the key scan.
@@ -1065,6 +1072,13 @@ public class PlannerTest extends PlannerTestBase {
   }
 
   @Test
+  public void testUnpivotClause() {
+    TQueryOptions options = defaultQueryOptions();
+    runPlannerTestFile("unpivot-clause", options,
+        ImmutableSet.of(PlannerTestOption.VALIDATE_CARDINALITY));
+  }
+
+  @Test
   public void testDefaultJoinDistributionBroadcastMode() {
     TQueryOptions options = defaultQueryOptions();
     Preconditions.checkState(
@@ -1713,7 +1727,7 @@ public class PlannerTest extends PlannerTestBase {
    */
   @Test
   public void testIcebergScanMetricsResultCardinality() {
-    final int expectedMethodNumber = 16;
+    final int expectedMethodNumber = 17;
 
     Method[] methods = ScanMetricsResult.class.getDeclaredMethods();
 

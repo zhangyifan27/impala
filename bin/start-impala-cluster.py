@@ -20,8 +20,6 @@
 # Starts up an Impala cluster (ImpalaD + State Store) with the specified number of
 # ImpalaD instances. Each ImpalaD runs on a different port allowing this to be run
 # on a single machine.
-from __future__ import absolute_import, division, print_function
-from builtins import range
 import getpass
 import itertools
 import json
@@ -30,12 +28,10 @@ import os
 import psutil
 import shlex
 import sys
-from datetime import datetime
-from getpass import getuser
-from time import sleep, time
+from time import sleep
 from optparse import OptionParser, SUPPRESS_HELP
 from subprocess import call, check_call, check_output
-from tests.common.environ import build_flavor_timeout
+from tests.common.environ import build_flavor_timeout, ENABLE_BEESWAX
 from tests.common.impala_cluster import (ImpalaCluster, DEFAULT_BEESWAX_PORT,
     DEFAULT_HS2_PORT, DEFAULT_KRPC_PORT, DEFAULT_HS2_HTTP_PORT,
     DEFAULT_STATE_STORE_SUBSCRIBER_PORT, DEFAULT_IMPALAD_WEBSERVER_PORT,
@@ -56,6 +52,8 @@ INTERNAL_LISTEN_HOST = os.getenv("INTERNAL_LISTEN_HOST", "localhost")
 TARGET_FILESYSTEM = os.getenv("TARGET_FILESYSTEM") or "hdfs"
 HOST_TZ = os.getenv("TZ", None)
 
+BOOLEAN_STRINGS = ["true", "false"]
+
 # Options
 parser = OptionParser()
 parser.add_option("-s", "--cluster_size", type="int", dest="cluster_size", default=3,
@@ -66,7 +64,7 @@ parser.add_option("--use_exclusive_coordinators", dest="use_exclusive_coordinato
                   action="store_true", default=False, help="If true, coordinators only "
                   "coordinate queries and execute coordinator fragments. If false, "
                   "coordinators also act as executors.")
-parser.add_option("--build_type", dest="build_type", default= "latest",
+parser.add_option("--build_type", dest="build_type", default="latest",
                   help="Build type to use - debug / release / latest")
 parser.add_option("--impalad_args", dest="impalad_args", action="append", type="string",
                   default=[],
@@ -201,13 +199,29 @@ parser.add_option("--tuple_cache_debug_dump_dir", dest="tuple_cache_debug_dump_d
 parser.add_option("--tuple_cache_eviction_policy", dest="tuple_cache_eviction_policy",
                   default="LRU", help="This specifies the cache eviction policy to use "
                   "for the tuple cache.")
-parser.add_option("--use_calcite_planner", default="False", type="choice",
-                  choices=["true", "True", "false", "False"],
+parser.add_option("--use_calcite_planner", type="choice", choices=BOOLEAN_STRINGS,
+                  default=os.environ.get("USE_CALCITE_PLANNER", "false"),
                   help="If true, use the Calcite planner for query optimization "
                   "instead of the Impala planner")
 parser.add_option("--enable_ranger_authz", dest="enable_ranger_authz",
                   action="store_true", default=False,
                   help="If true, enable Ranger authorization in Impala cluster.")
+parser.add_option("--enable_tls", dest="enable_tls",
+                  action="store_true", default=False,
+                  help="If true, enable TLS on webserver and Thrift ports. "
+                       "uses be/src/testutil/localhost.pem as the server certificate and "
+                       "be/src/testutil/wildcardCA.pem as the CA certificate. Also binds "
+                       "all server sockets to localhost instead of 0.0.0.0")
+parser.add_option("--enable_beeswax", dest="enable_beeswax",
+                  action="store_true", default=ENABLE_BEESWAX,
+                  help="If true, enable beeswax port in Impala cluster.")
+parser.add_option("--tcmalloc_aggressive_decommit",
+                  type="choice", choices=BOOLEAN_STRINGS,
+                  default=os.environ.get("IMPALA_TCMALLOC_AGGRESSIVE_DECOMMIT", "true"),
+                  help="Sets Gperftools TCMalloc's aggressive decommit setting for the "
+                       "Impalads. This has no effect when using a different malloc "
+                       "implementation. This does not change the setting for non-Impalad "
+                       "daemons")
 
 # For testing: list of comma-separated delays, in milliseconds, that delay impalad catalog
 # replica initialization. The ith delay is applied to the ith impalad.
@@ -215,8 +229,8 @@ parser.add_option("--catalog_init_delays", dest="catalog_init_delays", default="
                   help=SUPPRESS_HELP)
 # For testing: Semi-colon separated list of startup arguments to be passed per impalad.
 # The ith group of options is applied to the ith impalad.
-parser.add_option("--per_impalad_args", dest="per_impalad_args", type="string"
-                  ,default="", help=SUPPRESS_HELP)
+parser.add_option("--per_impalad_args", dest="per_impalad_args", type="string",
+                  default="", help=SUPPRESS_HELP)
 
 options, args = parser.parse_args()
 
@@ -235,6 +249,10 @@ KUDU_RPC_TIMEOUT = build_flavor_timeout(0, slow_build_timeout=60000)
 # HTTP connections don't keep alive their associated sessions. We increase the timeout
 # during builds to make spurious session expiration less likely.
 DISCONNECTED_SESSION_TIMEOUT = 60 * 60 * 6
+
+# Directory where TLS certificates are located.
+CERT_DIR = "{}/be/src/testutil".format(os.environ['IMPALA_HOME'])
+
 
 def check_process_exists(binary, attempts=1):
   """Checks if a process exists given the binary name. The `attempts` count allows us to
@@ -264,6 +282,7 @@ def print_actual_log_file(log_symlink, timeout=5):
         return
     sleep(1)
 
+
 def run_daemon_with_options(daemon_binary, args, output_file, jvm_debug_port=None):
   """Wrapper around run_daemon() with options determined from command-line options."""
   env_vars = {"JAVA_TOOL_OPTIONS": build_java_tool_options(jvm_debug_port)}
@@ -283,11 +302,12 @@ def build_java_tool_options(jvm_debug_port=None):
   if options.docker_network is not None:
     java_tool_options = "-XX:ErrorFile=/opt/impala/java-error/hs_err_pid_%p.log"
   if jvm_debug_port is not None:
-    java_tool_options = ("-agentlib:jdwp=transport=dt_socket,address={debug_port}," +
+    java_tool_options = ("-agentlib:jdwp=transport=dt_socket,address={debug_port},"
         "server=y,suspend=n ").format(debug_port=jvm_debug_port) + java_tool_options
   if options.jvm_args is not None:
     java_tool_options += " " + options.jvm_args
   return java_tool_options
+
 
 def kill_matching_processes(binary_names, force=False):
   """Kills all processes with the given binary name, waiting for them to exit"""
@@ -326,9 +346,8 @@ def choose_impalad_ports(instance_num):
           'webserver_port': DEFAULT_IMPALAD_WEBSERVER_PORT + instance_num}
 
 
-def build_impalad_port_args(instance_num):
+def build_impalad_port_args(instance_num, enable_beeswax=False):
   IMPALAD_PORTS = (
-      "-beeswax_port={beeswax_port} "
       "-hs2_port={hs2_port} "
       "-hs2_http_port={hs2_http_port} "
       "-krpc_port={krpc_port} "
@@ -336,6 +355,8 @@ def build_impalad_port_args(instance_num):
       "-webserver_port={webserver_port}")
   if options.enable_external_fe_support:
     IMPALAD_PORTS += " -external_fe_port={external_fe_port}"
+  if enable_beeswax:
+    IMPALAD_PORTS += " -beeswax_port={beeswax_port}"
   return IMPALAD_PORTS.format(**choose_impalad_ports(instance_num))
 
 
@@ -460,6 +481,14 @@ def build_statestored_arg_list(num_statestored, remap_ports):
       args.extend(["-enable_catalogd_ha=true"])
     if options.enable_statestored_ha:
       args.extend(["-enable_statestored_ha=true"])
+    if options.enable_tls:
+      args.extend(["--hostname=localhost",
+                   "--webserver_interface=localhost",
+                   "--webserver_certificate_file={0}/localhost.pem".format(CERT_DIR),
+                   "--webserver_private_key_file={0}/localhost.key".format(CERT_DIR),
+                   "--ssl_client_ca_certificate={0}/wildcardCA.pem".format(CERT_DIR),
+                   "--ssl_server_certificate={0}/localhost.pem".format(CERT_DIR),
+                   "--ssl_private_key={0}/localhost.key".format(CERT_DIR)])
     statestored_arg_list.append(args)
   return statestored_arg_list
 
@@ -487,8 +516,16 @@ def build_catalogd_arg_list(num_catalogd, remap_ports):
       args.extend(
           ["-state_store_2_port={0}".format(state_store_port + 1)])
     if options.enable_ranger_authz:
-      args.extend(["--server-name=server1", "--ranger_service_type=hive",
+      args.extend(["--server_name=server1", "--ranger_service_type=hive",
                    "--ranger_app_id=impala", "--authorization_provider=ranger"])
+    if options.enable_tls:
+      args.extend(["--hostname=localhost",
+                   "--webserver_interface=localhost",
+                   "--webserver_certificate_file={0}/localhost.pem".format(CERT_DIR),
+                   "--webserver_private_key_file={0}/localhost.key".format(CERT_DIR),
+                   "--ssl_client_ca_certificate={0}/wildcardCA.pem".format(CERT_DIR),
+                   "--ssl_server_certificate={0}/localhost.pem".format(CERT_DIR),
+                   "--ssl_private_key={0}/localhost.key".format(CERT_DIR)])
     catalogd_arg_list.append(args)
   return catalogd_arg_list
 
@@ -505,11 +542,20 @@ def build_admissiond_arg_list():
         ["-state_store_port={0}".format(state_store_port)])
     args.extend(
         ["-state_store_2_port={0}".format(state_store_port + 1)])
+    if options.enable_tls:
+      args.extend(["--hostname=localhost",
+                   "--webserver_interface=localhost",
+                   "--webserver_certificate_file={0}/localhost.pem".format(CERT_DIR),
+                   "--webserver_private_key_file={0}/localhost.key".format(CERT_DIR),
+                   "--ssl_client_ca_certificate={0}/wildcardCA.pem".format(CERT_DIR),
+                   "--ssl_server_certificate={0}/localhost.pem".format(CERT_DIR),
+                   "--ssl_private_key={0}/localhost.key".format(CERT_DIR)])
   return args
 
 
 def build_impalad_arg_lists(cluster_size, num_coordinators, use_exclusive_coordinators,
-    remap_ports, start_idx=0, admissiond_host=INTERNAL_LISTEN_HOST):
+    remap_ports, start_idx=0, admissiond_host=INTERNAL_LISTEN_HOST,
+    enable_beeswax=False):
   """Build the argument lists for impala daemons in the cluster. Returns a list of
   argument lists, one for each impala daemon in the cluster. Each argument list is
   a list of strings. 'num_coordinators' and 'use_exclusive_coordinators' allow setting
@@ -543,7 +589,7 @@ def build_impalad_arg_lists(cluster_size, num_coordinators, use_exclusive_coordi
 
     impala_port_args = ""
     if remap_ports:
-      impala_port_args = build_impalad_port_args(i)
+      impala_port_args = build_impalad_port_args(i, enable_beeswax=enable_beeswax)
     # impalad args from the --impalad_args flag. Also replacing '#ID' with the instance.
     param_args = (" ".join(options.impalad_args)).replace("#ID", str(i))
     args = ("{mem_limit_arg} "
@@ -722,8 +768,25 @@ def build_impalad_arg_lists(cluster_size, num_coordinators, use_exclusive_coordi
       os.environ["USE_CALCITE_PLANNER"] = "true"
 
     if options.enable_ranger_authz:
-      args = ("--server-name=server1 --ranger_service_type=hive --ranger_app_id=impala "
+      args = ("--server_name=server1 --ranger_service_type=hive --ranger_app_id=impala "
               "--authorization_provider=ranger {args}").format(args=args)
+
+    if options.enable_tls:
+      args = ("--hostname=localhost "
+              "--webserver_interface=localhost "
+              "--webserver_certificate_file={cert_dir}/localhost.pem "
+              "--webserver_private_key_file={cert_dir}/localhost.key "
+              "--ssl_client_ca_certificate={cert_dir}/wildcardCA.pem "
+              "--ssl_server_certificate={cert_dir}/localhost.pem "
+              "--ssl_private_key={cert_dir}/localhost.key {args}") \
+              .format(args=args, cert_dir=CERT_DIR)
+
+    args = ("--tcmalloc_aggressive_memory_decommit={val} {args}") \
+            .format(val=options.tcmalloc_aggressive_decommit, args=args)
+    # Currently, madvise_huge_pages is incompatible with turning off aggressive
+    # decommit.
+    if options.tcmalloc_aggressive_decommit == "false":
+      args = "--madvise_huge_pages=false {args}".format(args=args)
 
     # Appended at the end so they can override previous args.
     if i < len(per_impalad_args):
@@ -772,14 +835,15 @@ def compute_impalad_mem_limit(cluster_size):
   mem_limit = int(0.7 * available_mem * 1024 * 1024 * 1024 / cluster_size)
   return min(12 * 1024 * 1024 * 1024, mem_limit)
 
+
 class MiniClusterOperations(object):
   """Implementations of operations for the non-containerized minicluster
   implementation.
   TODO: much of this logic could be moved into ImpalaCluster.
   """
-  def __init__(self):
-    # Track log symlinks to print after cluster is ready
+  def __init__(self, enable_beeswax=False):
     self.log_symlinks = []
+    self.enable_beeswax = enable_beeswax
 
   def get_cluster(self):
     """Return an ImpalaCluster instance."""
@@ -865,7 +929,7 @@ class MiniClusterOperations(object):
 
     impalad_arg_lists = build_impalad_arg_lists(
         cluster_size, num_coordinators, use_exclusive_coordinators, remap_ports=True,
-        start_idx=start_idx)
+        start_idx=start_idx, enable_beeswax=self.enable_beeswax)
     assert cluster_size == len(impalad_arg_lists)
     for i in range(start_idx, start_idx + cluster_size):
       service_name = impalad_service_name(i)
@@ -892,10 +956,11 @@ class DockerMiniClusterOperations(object):
   e.g. impala-test-cluster-impala_network-catalogd or
   impala-test-cluster-impala_network-impalad-0.
   """
-  def __init__(self, network_name):
+  def __init__(self, network_name, enable_beeswax=False):
     self.network_name = network_name
     # Track log symlinks to print after cluster is ready (not used in docker mode)
     self.log_symlinks = []
+    self.enable_beeswax = enable_beeswax
     # Make sure that the network actually exists.
     check_call(["docker", "network", "inspect", network_name])
 
@@ -910,7 +975,7 @@ class DockerMiniClusterOperations(object):
     self.kill_admissiond(force=force)
     self.kill_all_impalads(force=force)
 
-  def kill_all_impalads(self, force=False):
+  def kill_all_impalads(self, force=False):  # noqa: U100
     # List all running containers on the network and kill those with the impalad name
     # prefix to make sure that no running container are left over from previous clusters.
     container_name_prefix = self.__gen_container_name__("impalad")
@@ -920,7 +985,7 @@ class DockerMiniClusterOperations(object):
         LOG.info("Stopping container {0}".format(container_name))
         check_call(["docker", "stop", container_name])
 
-  def kill_all_catalogds(self, force=False):
+  def kill_all_catalogds(self, force=False):  # noqa: U100
     # List all running containers on the network and kill those with the catalogd name
     # prefix to make sure that no running container are left over from previous clusters.
     container_name_prefix = self.__gen_container_name__("catalogd")
@@ -930,7 +995,7 @@ class DockerMiniClusterOperations(object):
         LOG.info("Stopping container {0}".format(container_name))
         check_call(["docker", "stop", container_name])
 
-  def kill_all_statestoreds(self, force=False):
+  def kill_all_statestoreds(self, force=False):  # noqa: U100
     # List all running containers on the network and kill those with the statestored name
     # prefix to make sure that no running container are left over from previous clusters.
     container_name_prefix = self.__gen_container_name__("statestored")
@@ -940,8 +1005,8 @@ class DockerMiniClusterOperations(object):
         LOG.info("Stopping container {0}".format(container_name))
         check_call(["docker", "stop", container_name])
 
-  def kill_admissiond(self, force=False):
-    self.__stop_container__("admissiond")
+  def kill_admissiond(self, force=False):  # noqa: U100
+      self.__stop_container__("admissiond")
 
   def start_statestore(self):
     if not options.enable_statestored_ha:
@@ -987,11 +1052,12 @@ class DockerMiniClusterOperations(object):
     mem_limit = compute_impalad_mem_limit(cluster_size)
     for i in range(cluster_size):
       chosen_ports = choose_impalad_ports(i)
-      port_map = {DEFAULT_BEESWAX_PORT: chosen_ports['beeswax_port'],
-                  DEFAULT_HS2_PORT: chosen_ports['hs2_port'],
+      port_map = {DEFAULT_HS2_PORT: chosen_ports['hs2_port'],
                   DEFAULT_HS2_HTTP_PORT: chosen_ports['hs2_http_port'],
                   DEFAULT_IMPALAD_WEBSERVER_PORT: chosen_ports['webserver_port'],
                   DEFAULT_EXTERNAL_FE_PORT: chosen_ports['external_fe_port']}
+      if self.enable_beeswax:
+        port_map[DEFAULT_BEESWAX_PORT] = chosen_ports['beeswax_port']
       self.__run_container__("impalad_coord_exec", impalad_arg_lists[i], port_map, i,
           mem_limit=mem_limit, supports_data_cache=True)
 
@@ -1070,8 +1136,8 @@ class DockerMiniClusterOperations(object):
     if timezone_as_env_var:
       env_args += ["-e", "TZ={0}".format(timezone_string)]
     # The container build processes tags the generated image with the daemon name.
-    debug_build = options.build_type == "debug" or (options.build_type == "latest" and
-        os.path.basename(os.path.dirname(os.readlink("be/build/latest"))) == "debug")
+    debug_build = options.build_type == "debug" or (options.build_type == "latest"
+        and os.path.basename(os.path.dirname(os.readlink("be/build/latest"))) == "debug")
     if debug_build:
       image_tag = daemon + "_debug"
     else:
@@ -1177,8 +1243,8 @@ def validate_options():
     LOG.error("Please specify a cluster size >= 0")
     sys.exit(1)
 
-  if (options.use_exclusive_coordinators and
-      options.num_coordinators >= options.cluster_size):
+  if (options.use_exclusive_coordinators
+      and options.num_coordinators >= options.cluster_size):
     LOG.info("Starting impala cluster without executors")
 
   if not os.path.isdir(options.log_dir):
@@ -1203,13 +1269,16 @@ def validate_options():
 
 
 if __name__ == "__main__":
-  logging.basicConfig(level=logging.ERROR, format="%(asctime)s %(threadName)s: %(message)s",
+  logging.basicConfig(
+    level=logging.ERROR,
+    format="%(asctime)s %(threadName)s: %(message)s",
     datefmt="%H:%M:%S")
   validate_options()
   if options.docker_network is None:
-    cluster_ops = MiniClusterOperations()
+    cluster_ops = MiniClusterOperations(enable_beeswax=options.enable_beeswax)
   else:
-    cluster_ops = DockerMiniClusterOperations(options.docker_network)
+    cluster_ops = DockerMiniClusterOperations(
+        options.docker_network, enable_beeswax=options.enable_beeswax)
 
   # If core-site.xml is missing, it likely means that we are missing config
   # files and should try regenerating them.
@@ -1284,7 +1353,9 @@ if __name__ == "__main__":
       # https://issues.apache.org/jira/browse/IMPALA-13755
       expected_num_ready_impalads = options.cluster_size
       expected_cluster_size = options.cluster_size
-    impala_cluster.wait_until_ready(expected_cluster_size, expected_num_ready_impalads)
+    impala_cluster.wait_until_ready(
+      expected_cluster_size, expected_num_ready_impalads,
+      enable_beeswax=options.enable_beeswax)
 
     # Print actual log files after cluster is ready
     if cluster_ops.log_symlinks:
@@ -1293,10 +1364,10 @@ if __name__ == "__main__":
         print_actual_log_file(log_symlink)
 
   except Exception as e:
-    LOG.exception("Error starting cluster")
+    LOG.exception("Error starting cluster: " + str(e))
     sys.exit(1)
 
-  if options.use_exclusive_coordinators == True:
+  if options.use_exclusive_coordinators:
     executors = options.cluster_size - options.num_coordinators
   else:
     executors = options.cluster_size

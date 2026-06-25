@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-from builtins import map
 from functools import partial
 import glob
 import json
@@ -37,7 +35,7 @@ def rewrite_metadata(prefix, unique_database, metadata_dir):
       continue
 
     version = metadata['format-version']
-    if version < 1 or version > 2:
+    if version < 1 or version > 3:
       print("WARN: skipping {}, unknown version {}".format(f, version))
       continue
 
@@ -133,7 +131,8 @@ def generate_new_path(table_params, file_path):
     assert len(li) == 2
     return new_expr.join(li)
 
-  return replace_last(result, table_name, "{}/{}".format(unique_database, table_name))
+  return replace_last(result, table_name,
+      "{}/{}".format(unique_database + ".db", table_name))
 
 
 def add_prefix_to_snapshot(table_params, snapshot):
@@ -163,6 +162,11 @@ def add_prefix_to_snapshot_entry(table_params, entry):
   if 'data_file' in entry:
     entry['data_file']['file_path'] = generate_new_path(
         table_params, entry['data_file']['file_path'])
+    if ('referenced_data_file' in entry['data_file']
+        and entry['data_file']['referenced_data_file'] is not None):
+      entry['data_file']['referenced_data_file'] = \
+          generate_new_path(
+              table_params, entry['data_file']['referenced_data_file'])
   return entry
 
 

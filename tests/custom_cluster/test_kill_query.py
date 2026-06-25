@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-
 import pytest
 
 import tests.common.cluster_config as cluster_config
@@ -116,7 +114,14 @@ class TestKillQuery(CustomClusterTestSuite):
       )
 
 
-@cluster_config.enable_authorization
+@CustomClusterTestSuite.with_args(
+    # Same as IMPALAD_ARGS and CATALOGD_ARGS in tests/authorization/test_ranger.py
+    impalad_args="--server_name=server1 --ranger_service_type=hive "
+                 "--ranger_app_id=impala --authorization_provider=ranger "
+                 "--beeswax_port=21000",
+    catalogd_args="--server_name=server1 --ranger_service_type=hive "
+                  "--ranger_app_id=impala --authorization_provider=ranger",
+    cluster_size=1)
 class TestKillQueryAuthorization(CustomClusterTestSuite):
   @pytest.mark.execute_serially
   def test_kill_as_admin(self):

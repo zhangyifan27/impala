@@ -21,12 +21,13 @@
 
 #include "exec/exec-node.h"
 #include "exec/join-op.h"
+#include "runtime/exec-env.h"
 #include "runtime/fragment-state.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
 #include "runtime/tuple-row.h"
 #include "util/debug-util.h"
-#include "util/pretty-printer.h"
+#include "util/flat_buffer.h"
 #include "util/runtime-profile-counters.h"
 
 #include "gen-cpp/PlanNodes_types.h"
@@ -179,9 +180,27 @@ Status IcebergDeleteBuilder::CalculateDataFiles() {
 
       memcpy(ptr_copy, file_path_str.c_str(), file_path_str.length());
 
+      RoaringBitmap64 bitmap;
+      if (params.scan_range().has_iceberg_deletion_vector()) {
+        const auto* ice_del_vector =
+            flatbuffers::GetRoot<org::apache::impala::fb::FbIcebergDeletionVector>(
+                params.scan_range().iceberg_deletion_vector().c_str());
+        int64_t content_size = ice_del_vector->content_size_in_bytes();
+        if (content_size <= 0) {
+          return Status(strings::Substitute(
+              "Invalid deletion vector for file '$0': content_size_in_bytes is $1.",
+              file_path_str, content_size));
+        }
+        VLOG_FILE << "Found DV for file " << file_path_str << " => "
+                  << ice_del_vector->path()->str();
+        SCOPED_TIMER(dv_load_timer_);
+        RETURN_IF_ERROR(dv_reader_.Load(reader_context_.get(), mem_tracker(), &obj_pool_,
+            ice_del_vector->path()->str(), ice_del_vector->content_offset(),
+            content_size, &bitmap));
+      }
       deleted_rows_.emplace(std::piecewise_construct,
           std::forward_as_tuple(ptr_copy, file_path_str.length()),
-          std::forward_as_tuple());
+          std::forward_as_tuple(std::move(bitmap)));
     }
   }
 
@@ -190,11 +209,34 @@ Status IcebergDeleteBuilder::CalculateDataFiles() {
 
 Status IcebergDeleteBuilder::Prepare(
     RuntimeState* state, MemTracker* parent_mem_tracker) {
+  SCOPED_TIMER(profile()->total_time_counter());
   RETURN_IF_ERROR(DataSink::Prepare(state, parent_mem_tracker));
 
-  RETURN_IF_ERROR(CalculateDataFiles());
-
   num_build_rows_ = ADD_COUNTER(profile(), "BuildRows", TUnit::UNIT);
+
+  dv_load_timer_ = ADD_TIMER(profile(), "DeletionVectorLoadTime");
+
+  reader_context_ = ExecEnv::GetInstance()->disk_io_mgr()->RegisterContext();
+
+  // Wire data cache counters into the request context so HdfsFileReader can update
+  // per-context cache statistics when reading deletion vector files.
+  data_cache_hit_count_ =
+      ADD_COUNTER(profile(), "DataCacheHitCount", TUnit::UNIT);
+  data_cache_partial_hit_count_ =
+      ADD_COUNTER(profile(), "DataCachePartialHitCount", TUnit::UNIT);
+  data_cache_miss_count_ =
+      ADD_COUNTER(profile(), "DataCacheMissCount", TUnit::UNIT);
+  data_cache_hit_bytes_ =
+      ADD_COUNTER(profile(), "DataCacheHitBytes", TUnit::BYTES);
+  data_cache_miss_bytes_ =
+      ADD_COUNTER(profile(), "DataCacheMissBytes", TUnit::BYTES);
+  reader_context_->set_data_cache_hit_counter(data_cache_hit_count_);
+  reader_context_->set_data_cache_partial_hit_counter(data_cache_partial_hit_count_);
+  reader_context_->set_data_cache_miss_counter(data_cache_miss_count_);
+  reader_context_->set_data_cache_hit_bytes_counter(data_cache_hit_bytes_);
+  reader_context_->set_data_cache_miss_bytes_counter(data_cache_miss_bytes_);
+
+  RETURN_IF_ERROR(CalculateDataFiles());
 
   RETURN_IF_ERROR(DebugAction(state->query_options(), "ID_BUILDER_PREPARE"));
 
@@ -239,6 +281,9 @@ Status IcebergDeleteBuilder::FinalizeBuild(RuntimeState* state) {
 
 void IcebergDeleteBuilder::Close(RuntimeState* state) {
   if (closed_) return;
+  if (reader_context_ != nullptr) {
+    ExecEnv::GetInstance()->disk_io_mgr()->UnregisterContext(reader_context_.get());
+  }
   obj_pool_.Clear();
   DataSink::Close(state);
   closed_ = true;

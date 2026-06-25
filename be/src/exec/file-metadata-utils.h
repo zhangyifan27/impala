@@ -18,13 +18,14 @@
 #pragma once
 
 #include "common/global-types.h"
+#include "exec/text-converter.h"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 
 namespace org::apache::impala::fb {
-  struct FbIcebergMetadata;
+  struct FbIcebergSplitMetadata;
 }
 
 namespace impala {
@@ -64,6 +65,23 @@ public:
   /// partition columns, virtual columns.
   bool NeedDataInFile(const SlotDescriptor* slot_desc);
 
+  /// Returns true if the column has an Iceberg initial-default value.
+  /// This is used by scanners to determine if a missing column should use the default
+  /// value instead of being set to NULL.
+  bool HasIcebergDefaultValue(const SlotDescriptor* slot_desc);
+
+  /// Returns true if we should skip reading this column from the file.
+  /// This returns true for partition columns, but false for columns with default values
+  /// when we have both defaults and data in files - in such cases we want the column
+  /// reader to be created and read data from file.
+  bool ShouldSkipReadFromFile(const SlotDescriptor* slot_desc);
+
+  /// Populates Iceberg initial-default values into the given template tuple.
+  /// The tuple must already exist (typically copied from the partition template tuple
+  /// built in HdfsScanPlanNode::InitTemplateTuple). This applies initial-default values
+  /// to top-level columns for Iceberg tables. Complex type defaults are not supported.
+  void PopulateIcebergDefaults(Tuple* template_tuple, MemPool* pool);
+
   /// Adjusts the file-level fieldID for data files residing in migrated partitioned
   /// Iceberg tables. It is OK to have none of the partition columns in the data
   /// file, or to have all of the partition columns, in any other case this method
@@ -73,20 +91,24 @@ public:
 private:
   void AddFileLevelVirtualColumns(MemPool* mem_pool, Tuple* template_tuple);
 
-  /// Writes the Iceberg columns from FbIcebergMetadata into template_tuple. Updates the
-  /// slot_descs_written map with the SlotDescriptors that were written into the
+  /// Writes the Iceberg columns from FbIcebergSplitMetadata into template_tuple. Updates
+  /// the slot_descs_written map with the SlotDescriptors that were written into the
   /// template_tuple.
   void AddIcebergColumns(MemPool* mem_pool, Tuple** template_tuple,
       std::map<const SlotId, const SlotDescriptor*>* slot_descs_written);
 
   /// Writes Iceberg-related virtual column values to the template tuple.
   void AddVirtualIcebergColumn(MemPool* mem_pool, Tuple* template_tuple,
-      const org::apache::impala::fb::FbIcebergMetadata& ice_metadata,
+      const org::apache::impala::fb::FbIcebergSplitMetadata& ice_metadata,
       const SlotDescriptor* slot_desc);
 
   /// Returns a pointer to the container of partition transforms. Only valid to call
   /// for Iceberg tables.
   auto IcebergPartitionTransforms() const;
+
+  /// Creates a TextConverter with the standard parameters used for parsing partition
+  /// values and default values.
+  TextConverter CreateTextConverter() const;
 
   HdfsScanNodeBase* const scan_node_;
 

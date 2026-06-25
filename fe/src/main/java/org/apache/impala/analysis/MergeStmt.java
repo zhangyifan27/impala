@@ -118,6 +118,8 @@ public class MergeStmt extends DmlStatementBase {
   public List<Expr> getResultExprs() { return impl_.getResultExprs(); }
   @Override
   public List<Expr> getPartitionKeyExprs() { return impl_.getPartitionKeyExprs(); }
+  @Override
+  public List<Expr> getShuffleExprs() { return impl_.getShuffleExprs(); }
 
   @Override
   public List<Expr> getSortExprs() { return impl_.getSortExprs(); }
@@ -183,9 +185,15 @@ public class MergeStmt extends DmlStatementBase {
     return cases_.stream().allMatch(
         mergeCase -> mergeCase.caseType().equals(TMergeCaseType.INSERT));
   }
+
   public boolean hasOnlyDeleteCases() {
     return cases_.stream().allMatch(
         mergeCase -> mergeCase.caseType().equals(TMergeCaseType.DELETE));
+  }
+
+  public boolean hasUpdateCase() {
+    return cases_.stream().anyMatch(
+        mergeCase -> mergeCase.caseType().equals(TMergeCaseType.UPDATE));
   }
 
   public TableRef getSourceTableRef() {

@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
-import distro
 import json
 import logging
 import os
@@ -45,13 +43,6 @@ if os.path.isfile(IMPALA_LOCAL_VERSION_INFO):
         IMPALA_LOCAL_BUILD_VERSION = match.group(1)
   if IMPALA_LOCAL_BUILD_VERSION is None:
     raise Exception("Could not find VERSION in {0}".format(IMPALA_LOCAL_VERSION_INFO))
-
-# Check if it is Red Hat/CentOS/Rocky/AlmaLinux Linux
-IS_REDHAT_DERIVATIVE = False
-# Python >= 3.8 removed platform.linux_distribution(). This now uses the 'distro'
-# package, which provides equivalent functionality across Python versions.
-if distro.id() in ['rhel', 'rocky', 'centos', 'almalinux']:
-  IS_REDHAT_DERIVATIVE = True
 
 # Find the likely BuildType of the running Impala. Assume it's found through the path
 # $IMPALA_HOME/be/build/latest as a fallback.
@@ -126,6 +117,11 @@ IS_TUPLE_CACHE = (
 IS_TUPLE_CACHE_CORRECT_CHECK = (
     os.getenv("TUPLE_CACHE_DEBUG_DUMP_DIR", "") != ""
 )
+
+IS_CALCITE_PLANNER = os.environ.get("USE_CALCITE_PLANNER", False) == 'true'
+
+# Whether to enable deprecated beeswax protocol or not.
+ENABLE_BEESWAX = os.getenv("ENABLE_BEESWAX", False) == "true"
 
 
 class ImpalaBuildFlavors:
@@ -351,6 +347,13 @@ class ImpalaTestClusterProperties(object):
         ImpalaBuildFlavors.CODE_COVERAGE_DEBUG, ImpalaBuildFlavors.TSAN,
         ImpalaBuildFlavors.UBSAN)
 
+  def is_sanitizer(self):
+    """
+    Return whether the Impala under test was compiled with any sanitizer
+    (ASAN, TSAN, or UBSAN).
+    """
+    return self.is_asan() or self.is_tsan() or self.is_ubsan()
+
   def runs_slowly(self):
     """
     Return whether the Impala under test "runs slowly". For our purposes this means
@@ -450,6 +453,10 @@ class ImpalaTestClusterProperties(object):
           "disabled")
         return False
       raise
+
+  def is_erasure_coding_enabled(self):
+    """Return whether the test cluster was built with erasure coding enabled."""
+    return os.getenv("ERASURE_CODING") == "true"
 
 
 def build_flavor_timeout(default_timeout, slow_build_timeout=None,

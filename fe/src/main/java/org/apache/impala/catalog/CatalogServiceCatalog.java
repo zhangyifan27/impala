@@ -1798,9 +1798,10 @@ public class CatalogServiceCatalog extends Catalog {
    * This method takes a lock on the table and adds it to the
    * {@link GetCatalogDeltaContext} which is eventually sent via the topic updates. A lock
    * on table essentially blocks other concurrent catalog operations on the table. Also,
-   * if the table is a {@link HdfsTable} and it is already locked, this method may or may
-   * not block until the table lock is acquired depending on whether lockWithTimeout
-   * parameter is false or not.
+   * if the table is one of {@link HdfsTable} or {@link IcebergTable} and it is already
+   * locked, this method may or may not block until the table lock is acquired depending
+   * on whether lockWithTimeout parameter is false or not.
+   *
    * When the lockWithTimeout is true this method attempts to acquire a lock with a
    * timeout specified by {@code topicUpdateTblLockMaxWaitTimeMs}. If the lock is acquired
    * within the timeout, it continues ahead and adds the table to the ctx. However, if
@@ -1816,10 +1817,10 @@ public class CatalogServiceCatalog extends Catalog {
   private void lockTableAndAddToCatalogDelta(final long tblVersion, Table tbl,
       GetCatalogDeltaContext ctx, boolean lockWithTimeout) throws TException {
     Stopwatch sw = Stopwatch.createStarted();
-    if (tbl instanceof HdfsTable && lockWithTimeout) {
-      if (!lockHdfsTblWithTimeout(tblVersion, (HdfsTable) tbl, ctx)) return;
+    if ((tbl instanceof HdfsTable || tbl instanceof IcebergTable) && lockWithTimeout) {
+      if (!lockTableWithTimeout(tblVersion, tbl, ctx)) return;
     } else {
-      // this is not HdfsTable or lockWithTimeout is false.
+      // this is not HdfsTable/IcebergTable or lockWithTimeout is false.
       // We block until table read lock is acquired.
       tbl.takeReadLock();
     }
@@ -1836,16 +1837,25 @@ public class CatalogServiceCatalog extends Catalog {
   }
 
   /**
-   * Attempts to take a read lock on the give HdfsTable within a configurable timeout
-   * of {@code topicUpdateTblLockMaxWaitTimeMs}.
+   * Attempts to take a read lock on an HdfsTable or IcebergTable within a configurable
+   * timeout of {@code topicUpdateTblLockMaxWaitTimeMs}.
+   * For IcebergTable, the table itself is locked but the internal HdfsTable is used for
+   * pending version tracking and skip counting.
    * @param tblVersion The version of the table when topic update thread inspects the
    *                   table to be added to the catalog topic updates.
-   * @param hdfsTable The table to be read locked.
+   * @param tbl The table to be read locked (HdfsTable or IcebergTable).
    * @param ctx The current {@link GetCatalogDeltaContext} for this topic update.
    * @return true if the table was successfully read-locked, false otherwise.
    */
-  private boolean lockHdfsTblWithTimeout(long tblVersion, HdfsTable hdfsTable,
+  private boolean lockTableWithTimeout(long tblVersion, Table tbl,
       GetCatalogDeltaContext ctx) {
+    // Get the HdfsTable for pending version tracking and skip counting.
+    // For HdfsTable, this is the table itself.
+    // For IcebergTable, get the internal HdfsTable.
+    HdfsTable hdfsTable = (tbl instanceof IcebergTable)
+      ? ((IcebergTable) tbl).getHdfsTable()
+        : (HdfsTable) tbl;
+
     // see the comment below on why we need 2 attempts.
     final int maxAttempts = 2;
     int attemptCount = 0;
@@ -1856,8 +1866,8 @@ public class CatalogServiceCatalog extends Catalog {
       // to wait to acquire the table lock. We make 2 attempts and hence the timeout here
       // is topicUpdateTblLockMaxWaitTimeMs/2 so that overall the method waits for
       // maximum of topicUpdateTblLockMaxWaitTimeMs for the lock.
-      long timeoutMs = topicUpdateTblLockMaxWaitTimeMs_ /maxAttempts;
-      lockAcquired = tryLock(hdfsTable, false, timeoutMs);
+      long timeoutMs = topicUpdateTblLockMaxWaitTimeMs_ / maxAttempts;
+      lockAcquired = tryLock(tbl, false, timeoutMs);
       if (lockAcquired) {
         // table lock was successfully acquired. We can now release the versionLock.
         versionLock_.writeLock().unlock();
@@ -1886,16 +1896,16 @@ public class CatalogServiceCatalog extends Catalog {
     // lock could not be acquired, we update the skip count in the topicUpdate entry
     // if applicable.
     TopicUpdateLog.Entry topicUpdateEntry = topicUpdateLog_
-        .getOrCreateLogEntry(hdfsTable.getUniqueName());
+        .getOrCreateLogEntry(tbl.getUniqueName());
     LOG.info(
         "Table {} (version={}, lastSeen={}) is skipping topic update ({}, {}] "
-            + "due to lock contention", hdfsTable.getFullName(), tblVersion,
+            + "due to lock contention", tbl.getFullName(), tblVersion,
         hdfsTable.getLastVersionSeenByTopicUpdate(), ctx.fromVersion, ctx.toVersion);
     if (hdfsTable.getLastVersionSeenByTopicUpdate() != tblVersion) {
       // if the last version skipped by topic update is not same as the last version
       // sent, it means the table was updated and topic update thread is lagging
       // behind.
-      topicUpdateLog_.add(hdfsTable.getUniqueName(),
+      topicUpdateLog_.add(tbl.getUniqueName(),
           new TopicUpdateLog.Entry(
               topicUpdateEntry.getNumSkippedTopicUpdates(),
               topicUpdateEntry.getLastSentVersion(),
@@ -1919,8 +1929,6 @@ public class CatalogServiceCatalog extends Catalog {
     Preconditions.checkState(tbl.isReadLockedByCurrentThread(),
         "Topic update thread does not hold a lock on table " + tbl.getFullName()
             + " while generating catalog delta");
-    TCatalogObject catalogTbl =
-        new TCatalogObject(TABLE, Catalog.INITIAL_CATALOG_VERSION);
     long tblVersion = tbl.getCatalogVersion();
     if (tblVersion <= ctx.fromVersion) {
       LOG.trace("Table {} version {} skipping the update ({}, {}]",
@@ -1942,25 +1950,25 @@ public class CatalogServiceCatalog extends Catalog {
               topicUpdateEntry.getNumSkippedUpdatesLockContention()));
       return;
     }
+    TCatalogObject catalogTbl = null;
     try {
       if (BackendConfig.INSTANCE.isIncrementalMetadataUpdatesEnabled()
           && tbl instanceof HdfsTable) {
+        catalogTbl =
+            new TCatalogObject(TABLE, tbl.getCatalogVersion());
+        catalogTbl.setLast_modified_time_ms(tbl.getLastLoadedTimeMs());
         catalogTbl.setTable(((HdfsTable) tbl).toThriftWithMinimalPartitions());
         addHdfsPartitionsToCatalogDelta((HdfsTable) tbl, ctx);
+      } else if (topicMode_ == TopicMode.MINIMAL) {
+        catalogTbl = tbl.toInvalidationObject();
       } else {
-        catalogTbl.setTable(tbl.toThrift());
-      }
-      // Update catalog object type from TABLE to VIEW if it's indeed a view.
-      if (TImpalaTableType.VIEW == tbl.getTableType()) {
-        catalogTbl.setType(TCatalogObjectType.VIEW);
+        catalogTbl = tbl.toTCatalogObject();
       }
     } catch (Exception e) {
       LOG.error(String.format("Error calling toThrift() on table %s: %s",
           tbl.getFullName(), e.getMessage()), e);
       return;
     }
-    catalogTbl.setCatalog_version(tbl.getCatalogVersion());
-    catalogTbl.setLast_modified_time_ms(tbl.getLastLoadedTimeMs());
     ctx.addCatalogObject(catalogTbl, false);
   }
 
@@ -2807,9 +2815,13 @@ public class CatalogServiceCatalog extends Catalog {
 
     long previousCatalogVersion = -1;
     // Return the table if it is already loaded or submit a new load request.
-    acquireVersionReadLock(catalogTimeline);
-    try {
-      tbl = getTable(dbName, tblName);
+    try (ReadLockAndLookupDb result = new ReadLockAndLookupDb(dbName)) {
+      catalogTimeline.markEvent(GOT_CATALOG_VERSION_READ_LOCK);
+      Db db = result.getDb();
+      if (db == null) {
+        throw new DatabaseNotFoundException("Database '" + dbName + "' not found");
+      }
+      tbl = db.getTable(tblName);
       // tbl doesn't exist in the catalog
       if (tbl == null) return null;
       LOG.trace("table {} exits in cache, last synced id {}", tbl.getFullName(),
@@ -2874,8 +2886,6 @@ public class CatalogServiceCatalog extends Catalog {
         loadReq = tableLoadingMgr_.loadAsync(tableName, tbl.getCreateEventId(), reason,
             queryId, catalogTimeline);
       }
-    } finally {
-      versionLock_.readLock().unlock();
     }
     if (!partsToBeRefreshed.isEmpty()) {
       return refreshFileMetadata((HdfsTable) tbl, partsToBeRefreshed, catalogTimeline);
@@ -3418,16 +3428,20 @@ public class CatalogServiceCatalog extends Catalog {
 
   /**
    * Invalidate the table if it exists by overwriting existing entry by a Incomplete
-   * Table.
-   * @return null if the table does not exist else return the invalidated table
+   * Table. If skipIfInvalidated true, the invalidation is skipped if the table is
+   * already an instance of IncompleteTable.
+   * @return null if the table does not exist or skipIfInvalidated is on and table is
+   * invalidated else return the invalidated table
    */
-  public @Nullable Table invalidateTableIfExists(String dbName, String tblName) {
+  public @Nullable Table invalidateTableIfExists(
+      String dbName, String tblName, boolean skipIfInvalidated) {
     Table incompleteTable;
     try (WriteLockAndLookupDb result = new WriteLockAndLookupDb(dbName)) {
       Db db = result.getDb();
       if (db == null) return null;
       Table existingTbl = db.getTable(tblName);
       if (existingTbl == null) return null;
+      if (skipIfInvalidated && existingTbl instanceof IncompleteTable) return null;
       incompleteTable = IncompleteTable.createUninitializedTable(db, tblName,
           existingTbl.getTableType(), existingTbl.getTableComment(),
           existingTbl.getCreateEventId());
@@ -3436,6 +3450,15 @@ public class CatalogServiceCatalog extends Catalog {
     }
     scheduleTableLoading(dbName, tblName);
     return incompleteTable;
+  }
+
+  /**
+   * Invalidate the table if it exists by overwriting existing entry by a Incomplete
+   * Table.
+   * @return null if the table does not exist else return the invalidated table
+   */
+  public @Nullable Table invalidateTableIfExists(String dbName, String tblName) {
+    return invalidateTableIfExists(dbName, tblName, false /* skipIfInvalidated */);
   }
 
   private void scheduleTableLoading(String dbName, String tableName) {
@@ -3792,11 +3815,6 @@ public class CatalogServiceCatalog extends Catalog {
 
   public long getNumCatalogResetStarts() {
     return numCatalogResetStarts_.get();
-  }
-
-  private void acquireVersionReadLock(EventSequence catalogTimeline) {
-    versionLock_.readLock().lock();
-    catalogTimeline.markEvent(GOT_CATALOG_VERSION_READ_LOCK);
   }
 
   public ReentrantReadWriteLock getLock() { return versionLock_; }

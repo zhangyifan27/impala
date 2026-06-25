@@ -17,14 +17,15 @@
 
 add_subdirectory(avro)
 add_subdirectory(hbase)
+add_subdirectory(iceberg-metadata)
 add_subdirectory(json)
 add_subdirectory(kudu)
 add_subdirectory(orc)
 add_subdirectory(parquet)
+add_subdirectory(puffin)
 add_subdirectory(rcfile)
 add_subdirectory(sequence)
 add_subdirectory(text)
-add_subdirectory(iceberg-metadata)
 add_subdirectory(paimon)
 
 # where to put generated libraries
@@ -117,6 +118,7 @@ add_library(Exec
   tuple-text-file-util.cc
   union-node.cc
   unnest-node.cc
+  unpivot-node.cc
 )
 
 add_dependencies(Exec gen-deps)

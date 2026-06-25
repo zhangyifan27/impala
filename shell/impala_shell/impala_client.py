@@ -33,6 +33,7 @@ import sasl
 from thrift.protocol import TBinaryProtocol
 from thrift.Thrift import TApplicationException, TException
 from thrift.transport.TSocket import TSocket
+from thrift.transport.TSSLSocket import TSSLSocket
 from thrift.transport.TTransport import TBufferedTransport, TTransportException
 from thrift_sasl import TSaslClientTransport
 
@@ -49,7 +50,6 @@ from impala_shell.shell_exceptions import (
     RPCException,
 )
 from impala_shell.thrift_printer import ThriftPrettyPrinter
-from impala_shell.TSSLSocketWithFixes import TSSLSocketWithFixes
 from impala_shell.value_converter import HS2ValueConverter
 from impala_thrift_gen.beeswax import BeeswaxService
 from impala_thrift_gen.beeswax.BeeswaxService import QueryState
@@ -121,6 +121,17 @@ def utf8_encode_if_needed(val):
   return val
 
 
+def get_ssl_context(ca_cert, verify_cert):
+  ssl_ctx = ssl.create_default_context(cafile=ca_cert)
+  if ca_cert or verify_cert:
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+  else:
+    ssl_ctx.check_hostname = False  # Mandated by the SSL lib for CERT_NONE mode.
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+  return ssl_ctx
+
+
 # Regular expression that matches the progress line added to HS2 logs by
 # the Impala server.
 HS2_LOG_PROGRESS_REGEX = re.compile(r"Query.*Complete \([0-9]* out of [0-9]*\)\n")
@@ -161,7 +172,8 @@ class ImpalaClient(object):
                verbose=True, use_http_base_transport=False, http_path=None,
                http_cookie_names=None, http_socket_timeout_s=None, value_converter=None,
                connect_max_tries=4, rpc_stdout=False, rpc_file=None, http_tracing=True,
-               jwt=None, oauth=None, hs2_x_forward=None, reuse_http_connection=True):
+               jwt=None, oauth=None, hs2_x_forward=None, reuse_http_connection=True,
+               verify_cert=False):
     self.connected = False
     self.impalad_host = impalad[0]
     self.impalad_port = int(impalad[1])
@@ -172,6 +184,7 @@ class ImpalaClient(object):
     self.kerberos_service_name = kerberos_service_name
     self.use_ssl = use_ssl
     self.ca_cert = ca_cert
+    self.verify_cert = verify_cert
     self.user, self.ldap_password = user, ldap_password
     self.use_ldap = use_ldap
     self.client_connect_timeout_ms = int(client_connect_timeout_ms)
@@ -207,12 +220,17 @@ class ImpalaClient(object):
     was already connected, closes the previous connection."""
     self.close_connection()
 
-    if self.use_http_base_transport:
-        self.transport = self._get_http_transport(self.client_connect_timeout_ms)
-    else:
-        self.transport = self._get_transport(self.client_connect_timeout_ms)
-    assert self.transport and self.transport.isOpen()
-
+    try:
+      if self.use_http_base_transport:
+          self.transport = self._get_http_transport(self.client_connect_timeout_ms)
+      else:
+          self.transport = self._get_transport(self.client_connect_timeout_ms)
+      assert self.transport and self.transport.isOpen()
+    except TTransportException as e:
+      # Unwrap socket.error so we can handle it directly.
+      if isinstance(e.inner, socket.error):
+        raise e.inner
+      raise
     if self.verbose:
       msg = 'Opened TCP connection to %s:%s' % (self.impalad_host, self.impalad_port)
       print(msg, file=sys.stderr)
@@ -429,12 +447,7 @@ class ImpalaClient(object):
     # ImpalaHttpClient relies on the URI scheme (http vs https) to open an appropriate
     # connection to the server.
     if self.use_ssl:
-      ssl_ctx = ssl.create_default_context(cafile=self.ca_cert)
-      if self.ca_cert:
-        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-      else:
-        ssl_ctx.check_hostname = False  # Mandated by the SSL lib for CERT_NONE mode.
-        ssl_ctx.verify_mode = ssl.CERT_NONE
+      ssl_ctx = get_ssl_context(self.ca_cert, self.verify_cert)
       url = "https://{0}/{1}".format(host_and_port, self.http_path)
       transport = ImpalaHttpClient(url, ssl_context=ssl_ctx,
                                    http_cookie_names=self.http_cookie_names,
@@ -507,12 +520,8 @@ class ImpalaClient(object):
     sock_host = self.impalad_host
     sock_port = self.impalad_port
     if self.use_ssl:
-      if self.ca_cert is None:
-        # No CA cert means don't try to verify the certificate
-        sock = TSSLSocketWithFixes(sock_host, sock_port, cert_reqs=ssl.CERT_NONE)
-      else:
-        sock = TSSLSocketWithFixes(
-            sock_host, sock_port, cert_reqs=ssl.CERT_REQUIRED, ca_certs=self.ca_cert)
+      ssl_ctx = get_ssl_context(self.ca_cert, self.verify_cert)
+      sock = TSSLSocket(sock_host, sock_port, ssl_context=ssl_ctx)
     else:
       sock = TSocket(sock_host, sock_port)
 

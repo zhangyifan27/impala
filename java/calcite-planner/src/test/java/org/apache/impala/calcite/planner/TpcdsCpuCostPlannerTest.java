@@ -17,19 +17,14 @@
 
 package org.apache.impala.calcite.planner;
 
-import com.google.common.collect.Sets;
-import com.google.common.io.Files;
-
 import org.apache.impala.catalog.SideloadTableStats;
 import org.apache.impala.common.ByteUnits;
 import org.apache.impala.common.RuntimeEnv;
 import org.apache.impala.planner.PlannerTestBase;
-import org.apache.impala.thrift.TExecutorGroupSet;
+import org.apache.impala.thrift.TPlannerType;
 import org.apache.impala.thrift.TQueryOptions;
 import org.apache.impala.thrift.TReplicaPreference;
 import org.apache.impala.thrift.TSlotCountStrategy;
-import org.apache.impala.thrift.TUpdateExecutorMembershipRequest;
-import org.apache.impala.util.ExecutorMembershipSnapshot;
 import org.apache.impala.util.RequestPoolService;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -38,9 +33,10 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URISyntaxException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.ArrayList;
+import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -77,7 +73,9 @@ public class TpcdsCpuCostPlannerTest extends PlannerTestBase {
           // Required so that output doesn't vary by whether scanned tables have stats &
           // numRows property or not.
           .setDisable_hdfs_num_rows_estimate(true)
-          .setUse_calcite_planner(true);
+          .setPlanner(TPlannerType.CALCITE)
+          .setFallback_planner(TPlannerType.CALCITE)
+          .setEnable_explain_calcite(true);
 
   // Database name to run this test.
   private static String testDb = "tpcds_partitioned_parquet_snap";
@@ -105,23 +103,28 @@ public class TpcdsCpuCostPlannerTest extends PlannerTestBase {
   private static TemporaryFolder tempFolder;
 
   /**
-   * Returns a {@link File} for the file on the classpath.
+   * Copies a file from the classpath (e.g. from the impala-frontend tests jar) into the
+   * temporary folder so it is available as a real file on disk.
    */
-  private static File getClasspathFile(String filename) throws URISyntaxException {
-    return new File(
-        TpcdsCpuCostPlannerTest.class.getClassLoader().getResource(filename).toURI());
+  private static File copyClasspathFileToTemp(String filename) throws IOException {
+    File destFile = tempFolder.newFile(filename);
+    try (InputStream in =
+        TpcdsCpuCostPlannerTest.class.getClassLoader().getResourceAsStream(filename)) {
+      if (in == null) {
+        throw new IOException("Resource not found on classpath: " + filename);
+      }
+      Files.copy(in, destFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+    }
+    return destFile;
   }
 
-  private static void setupAdmissionControl() throws IOException, URISyntaxException {
+  private static void setupAdmissionControl() throws IOException {
     // Start admission control with config file fair-scheduler-3-groups.xml
     // and llama-site-3-groups.xml
     tempFolder = new TemporaryFolder();
     tempFolder.create();
-    File allocationConfFile = tempFolder.newFile(ALLOCATION_FILE);
-    Files.copy(getClasspathFile(ALLOCATION_FILE), allocationConfFile);
-
-    File llamaConfFile = tempFolder.newFile(LLAMA_CONFIG_FILE);
-    Files.copy(getClasspathFile(LLAMA_CONFIG_FILE), llamaConfFile);
+    File allocationConfFile = copyClasspathFileToTemp(ALLOCATION_FILE);
+    File llamaConfFile = copyClasspathFileToTemp(LLAMA_CONFIG_FILE);
     // Intentionally mark isTest = false to cache poolService as a singleton.
     RequestPoolService poolService =
         RequestPoolService.getInstance(allocationConfFile.getAbsolutePath(),

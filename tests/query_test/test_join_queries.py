@@ -17,12 +17,11 @@
 
 # Targeted tests for Impala joins
 #
-from __future__ import absolute_import, division, print_function
 import pytest
 from copy import deepcopy
 
 from tests.common.impala_test_suite import ImpalaTestSuite
-from tests.common.skip import SkipIf, SkipIfFS
+from tests.common.skip import SkipIf, SkipIfExploration, SkipIfFS
 from tests.common.test_dimensions import (
     add_exec_option_dimension,
     add_mandatory_exec_option,
@@ -105,14 +104,12 @@ class TestSingleNodeJoins(TestJoinBase):
     self.run_test_case('QueryTest/single-node-nlj', vector)
 
 
+@SkipIfExploration.is_not_exhaustive()
 class TestSingleNodeJoinsExhaustive(TestJoinBase):
 
   @classmethod
   def add_test_dimensions(cls):
     super(TestSingleNodeJoinsExhaustive, cls).add_test_dimensions()
-    if cls.exploration_strategy() != 'exhaustive':
-      # skip this test if not in exhaustive exploration.
-      pytest.skip("Only run in exhaustive exploration.")
 
     # Redeclare exec options with num_nodes=1, batch_size=0.
     cls.ImpalaTestMatrix.add_dimension(
@@ -209,29 +206,26 @@ class TestSemiJoinQueries(TestJoinBase):
     self.run_test_case('QueryTest/semi-joins', vector, unique_database)
 
 
+@SkipIfExploration.is_not_exhaustive()
 class TestSemiJoinQueriesExhaustive(TestJoinBase):
 
   @classmethod
   def add_test_dimensions(cls):
     super(TestSemiJoinQueriesExhaustive, cls).add_test_dimensions()
-    if cls.exploration_strategy() != 'exhaustive':
-      # skip this test if not in exhaustive exploration.
-      pytest.skip("Only run in exhaustive exploration.")
 
   @pytest.mark.execute_serially
   def test_semi_joins_exhaustive(self, vector):
     """Expensive and memory-intensive semi-join tests."""
     self.run_test_case('QueryTest/semi-joins-exhaustive', vector)
 
-
+# To cut down on test execution time, only run in exhaustive.
+@SkipIfExploration.is_not_exhaustive()
 class TestSpillingHashJoin(ImpalaTestSuite):
 
   @classmethod
   def add_test_dimensions(cls):
     super(TestSpillingHashJoin, cls).add_test_dimensions()
-    # To cut down on test execution time, only run in exhaustive.
-    if cls.exploration_strategy() != 'exhaustive':
-      pytest.skip("Only run in exhaustive exploration.")
+
     cls.ImpalaTestMatrix.add_constraint(
         lambda v: v.get_value('table_format').file_format == 'parquet')
     cls.ImpalaTestMatrix.add_constraint(lambda v:
@@ -266,7 +260,7 @@ class TestExprValueCache(ImpalaTestSuite):
     cls.ImpalaTestMatrix.add_dimension(
         create_table_format_dimension(cls.get_workload(), 'parquet/snap/block'))
     add_mandatory_exec_option(cls, 'runtime_filter_mode', 'OFF')
-    add_mandatory_exec_option(cls, 'mem_limit', '149mb')
+    add_mandatory_exec_option(cls, 'mem_limit', '153mb')
     add_mandatory_exec_option(cls, 'mt_dop', 1)
 
   def test_expr_value_cache_fits(self, vector):

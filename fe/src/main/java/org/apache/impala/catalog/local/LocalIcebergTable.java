@@ -23,9 +23,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.Table;
+import org.apache.iceberg.BaseTable;
 import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.catalog.CatalogObject.ThriftObjectType;
 import org.apache.impala.catalog.Column;
@@ -52,13 +54,14 @@ import org.apache.impala.util.IcebergUtil;
 import com.google.common.base.Preconditions;
 import com.google.errorprone.annotations.Immutable;
 
-import org.apache.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Iceberg table for LocalCatalog
  */
 public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
-  private static final Logger LOG = Logger.getLogger(LocalIcebergTable.class);
+  private static final Logger LOG = LoggerFactory.getLogger(LocalIcebergTable.class);
   private TableParams tableParams_;
   private TIcebergFileFormat icebergFileFormat_;
   private TCompressionCodec icebergParquetCompressionCodec_;
@@ -90,6 +93,9 @@ public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
       TableParams tableParams = new TableParams(msTable);
       TPartialTableInfo tableInfo = db.getCatalog().getMetaProvider()
           .loadIcebergTable(ref);
+      MetaProvider.CachedIcebergFiles cachedFiles =
+          db.getCatalog().getMetaProvider().loadIcebergContentFileStore(ref);
+
       LocalFsTable fsTable = LocalFsTable.load(db, msTable, ref);
       warmupMetaProviderCache(db, msTable, ref, fsTable);
       org.apache.iceberg.Table icebergApiTable = db.getCatalog().getMetaProvider()
@@ -97,12 +103,16 @@ public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
       List<Column> iceColumns = IcebergSchemaConverter.convertToImpalaSchema(
           icebergApiTable.schema());
       validateColumns(iceColumns, msTable.getSd().getCols());
+      int formatVersion =
+          ((BaseTable) icebergApiTable).operations().current().formatVersion();
+      iceColumns.addAll(
+          FeIcebergTable.getHiddenColumns(formatVersion, iceColumns.size()));
       ColumnMap colMap = new ColumnMap(iceColumns,
           /*numClusteringCols=*/ 0,
           db.getName() + "." + msTable.getTableName(),
           /*isFullAcidSchema=*/false);
       return new LocalIcebergTable(db, msTable, ref, fsTable, colMap, tableInfo,
-          tableParams, icebergApiTable);
+          tableParams, icebergApiTable, cachedFiles);
     } catch (InconsistentMetadataFetchException e) {
       // Just rethrow this so the query can be retried by the Frontend.
       throw e;
@@ -138,17 +148,17 @@ public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
 
   private LocalIcebergTable(LocalDb db, Table msTable, MetaProvider.TableMetaRef ref,
       LocalFsTable fsTable, ColumnMap cmap, TPartialTableInfo tableInfo,
-      TableParams tableParams, org.apache.iceberg.Table icebergApiTable)
+      TableParams tableParams, org.apache.iceberg.Table icebergApiTable,
+      MetaProvider.CachedIcebergFiles cachedFiles)
       throws ImpalaRuntimeException {
     super(db, msTable, ref, cmap);
 
     Preconditions.checkNotNull(tableInfo);
     localFsTable_ = fsTable;
     tableParams_ = tableParams;
-    fileStore_ = IcebergContentFileStore.fromThrift(
-        tableInfo.getIceberg_table().getContent_files(),
-        tableInfo.getNetwork_addresses(),
-        getHostIndex());
+    fileStore_ = cachedFiles.fileStore;
+    getHostIndex().populate(cachedFiles.hostIndex.getList());
+    partitionStats_ = cachedFiles.partitionStats;
     if (fileStore_.hasAvro()) localFsTable_.setAvroSchema(msTable);
     icebergApiTable_ = icebergApiTable;
     catalogSnapshotId_ = tableInfo.getIceberg_table().getCatalog_snapshot_id();
@@ -159,7 +169,6 @@ public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
     icebergParquetRowGroupSize_ = Utils.getIcebergParquetRowGroupSize(msTable);
     icebergParquetPlainPageSize_ = Utils.getIcebergParquetPlainPageSize(msTable);
     icebergParquetDictPageSize_ = Utils.getIcebergParquetDictPageSize(msTable);
-    partitionStats_ = tableInfo.getIceberg_table().getPartition_stats();
     setIcebergTableStats();
     addVirtualColumns(ref.getVirtualColumns());
   }
@@ -170,6 +179,27 @@ public class LocalIcebergTable extends LocalTable implements FeIcebergTable {
       Preconditions.checkState(
           impalaCols.get(i).getName().equalsIgnoreCase(hmsCols.get(i).getName()));
     }
+  }
+
+  @Override
+  public List<Column> getColumnsInHiveOrder() {
+    if (getFormatVersion() < 3) {
+      return super.getColumnsInHiveOrder();
+    } else {
+      return super.getColumnsInHiveOrder().stream()
+          .filter(col -> !col.isHidden())
+          .collect(Collectors.toList());
+    }
+  }
+
+  @Override
+  public List<String> getColumnNames() {
+    return filterHiddenColumnNames(super.getColumns());
+  }
+
+  @Override
+  public List<Column> getNonClusteringColumns() {
+    return filterHiddenColumns(super.getNonClusteringColumns());
   }
 
   @Override

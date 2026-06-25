@@ -49,6 +49,20 @@ public class VirtualColumn extends Column {
       "ICEBERG__DATA__SEQUENCE__NUMBER",
       Type.BIGINT,
       TVirtualColumnType.ICEBERG_DATA_SEQUENCE_NUMBER);
+  public static VirtualColumn ICEBERG_FIRST_ROW_ID = new VirtualColumn(
+      "ICEBERG__FIRST__ROW__ID",
+      Type.BIGINT,
+      TVirtualColumnType.ICEBERG_FIRST_ROW_ID);
+
+  // Iceberg V3 syntactic-sugar virtual columns (rewritten during analysis).
+  public static VirtualColumn ICEBERG_ROW_ID = new VirtualColumn(
+      "_row_id",
+      Type.BIGINT,
+      TVirtualColumnType.ICEBERG_ROW_ID);
+  public static VirtualColumn ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER = new VirtualColumn(
+      "_last_updated_sequence_number",
+      Type.BIGINT,
+      TVirtualColumnType.ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER);
 
   // Paimon-related virtual columns.
   public static VirtualColumn PARTITION_VALUE_SERIALIZED = new
@@ -67,6 +81,10 @@ public class VirtualColumn extends Column {
       case ICEBERG_DATA_SEQUENCE_NUMBER: return ICEBERG_DATA_SEQUENCE_NUMBER;
       case PARTITION_VALUE_SERIALIZED: return PARTITION_VALUE_SERIALIZED;
       case BUCKET_ID: return BUCKET_ID;
+      case ICEBERG_FIRST_ROW_ID: return ICEBERG_FIRST_ROW_ID;
+      case ICEBERG_ROW_ID: return ICEBERG_ROW_ID;
+      case ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER:
+          return ICEBERG_LAST_UPDATED_SEQUENCE_NUMBER;
       default: break;
     }
     return null;

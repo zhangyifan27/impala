@@ -18,8 +18,14 @@
 #ifndef IMPALA_UTIL_JSON_UTIL_H
 #define IMPALA_UTIL_JSON_UTIL_H
 
+#include <string>
+
 #include <rapidjson/document.h>
 #include <rapidjson/rapidjson.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+
+#include <string>
 
 #include "util/pretty-printer.h"
 #include "util/template-util.h"
@@ -72,6 +78,9 @@ ToJsonValue(const T& value, const TUnit::type unit, rapidjson::Document* documen
 /// is enabled.
 void ProtobufToJson(const google::protobuf::Message& pb, rapidjson::Document* document,
     rapidjson::Value* obj);
+
+/// Serializes a rapidjson::Value to compact JSON.
+std::string JsonToString(const rapidjson::Value& value);
 } // namespace impala
 
 /// A wrapper for creating a rapidjson::Value with new fields.

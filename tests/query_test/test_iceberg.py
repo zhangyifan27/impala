@@ -15,20 +15,23 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from __future__ import absolute_import, division, print_function
 from collections import defaultdict, namedtuple
 import datetime
+import glob
 import json
 import logging
 import os
 import random
 import re
+import shutil
+import struct
 from subprocess import check_call, check_output
+import sys
+import tempfile
 import time
 
 from avro.datafile import DataFileReader
 from avro.io import DatumReader
-from builtins import range
 import pytest
 import pytz
 
@@ -812,6 +815,45 @@ class TestIcebergTable(IcebergTestSuite):
 
   def test_time_travel_queries(self, vector, unique_database):
     self.run_test_case('QueryTest/iceberg-time-travel', vector, use_db=unique_database)
+
+  @SkipIf.not_hdfs
+  def test_time_travel_after_optimize(self, unique_database):
+    """IMPALA-14970: Regression test for time-travel queries after OPTIMIZE on HDFS
+    clusters with replication factor 1. After OPTIMIZE, old data files (referenced by
+    earlier snapshots) may reside on different data nodes than the compacted file.
+    Time-traveling to a pre-optimize snapshot must be able to add new host entries to
+    the table's host index."""
+    tbl_name = unique_database + ".ice_tt_optimize"
+    self.client.execute("""CREATE TABLE {0} (i INT, p INT)
+        PARTITIONED BY SPEC (p)
+        STORED AS ICEBERG
+        TBLPROPERTIES('iceberg.catalog'='hadoop.tables')""".format(tbl_name))
+
+    self.client.execute("INSERT INTO {0} VALUES (1, 1)".format(tbl_name))
+    self.client.execute("INSERT INTO {0} VALUES (2, 1)".format(tbl_name))
+    self.client.execute("INSERT INTO {0} VALUES (3, 1)".format(tbl_name))
+
+    snapshots_before = get_snapshots(self.client, tbl_name)
+    snapshot_before_optimize = snapshots_before[-1]
+
+    self.client.execute("OPTIMIZE TABLE {0}".format(tbl_name))
+    # Get the single data file after OPTIMIZE and set its replication factor to 1.
+    # This ensures the host index after INVALIDATE METADATA only contains a single
+    # datanode entry. When time-traveling to the pre-optimize snapshot, the old files
+    # may be on a different datanode, forcing modification of the host index.
+    files_result = self.execute_query(
+        "SELECT file_path FROM {0}.`files`".format(tbl_name))
+    assert len(files_result.data) == 1
+    data_file = files_result.data[0]
+    check_call(["hdfs", "dfs", "-setrep", "-w", "-R", "1", data_file])
+
+    self.client.execute("INVALIDATE METADATA {0}".format(tbl_name))
+
+    result_current = self.execute_query("SELECT * FROM {0} ORDER BY i".format(tbl_name))
+    result_time_travel = self.execute_query(
+        "SELECT * FROM {0} FOR SYSTEM_VERSION AS OF {1} ORDER BY i".format(
+            tbl_name, snapshot_before_optimize.get_snapshot_id()))
+    assert result_current.data == result_time_travel.data
 
   @SkipIf.not_dfs
   def test_strings_utf8(self, unique_database):
@@ -1707,16 +1749,16 @@ class TestIcebergV2Table(IcebergTestSuite):
     # Revisit this if 'batch_size' dimension size increase.
     vector.unset_exec_option('batch_size')
     with self.create_impala_client() as impalad_client:
-      overwrite_snapshot_id = impalad_client.execute("select snapshot_id from "
+      delete_snapshot_id = impalad_client.execute("select snapshot_id from "
                              "functional_parquet.iceberg_query_metadata.snapshots "
-                             "where operation = 'overwrite';")
-      overwrite_snapshot_ts = impalad_client.execute("select committed_at from "
+                             "where operation = 'delete';")
+      delete_snapshot_ts = impalad_client.execute("select committed_at from "
                              "functional_parquet.iceberg_query_metadata.snapshots "
-                             "where operation = 'overwrite';")
+                             "where operation = 'delete';")
       self.run_test_case('QueryTest/iceberg-metadata-tables', vector,
           unique_database,
-          test_file_vars={'$OVERWRITE_SNAPSHOT_ID': str(overwrite_snapshot_id.data[0]),
-                          '$OVERWRITE_SNAPSHOT_TS': str(overwrite_snapshot_ts.data[0])})
+          test_file_vars={'$DELETE_SNAPSHOT_ID': str(delete_snapshot_id.data[0]),
+                          '$DELETE_SNAPSHOT_TS': str(delete_snapshot_ts.data[0])})
 
   @SkipIf.not_hdfs
   def test_missing_data_files(self, vector, unique_database):
@@ -2250,6 +2292,9 @@ class TestIcebergV2Table(IcebergTestSuite):
     self.run_test_case('QueryTest/iceberg-predicate-push-down-hint', vector,
                        use_db=unique_database)
 
+  def test_like_pushdown(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-like-pushdown', vector, use_db=unique_database)
+
   def test_partitions(self, vector, unique_database):
     self.run_test_case('QueryTest/iceberg-partitions', vector, unique_database)
     tbl_name = unique_database + ".ice_num_partitions"
@@ -2263,6 +2308,9 @@ class TestIcebergV2Table(IcebergTestSuite):
         "SELECT * FROM {0} for system_version as of {1} WHERE id < 5;".format(
             tbl_name, second_snapshot.get_snapshot_id()))
     assert "partitions=2/unknown" in selective_time_travel_data.runtime_profile
+
+  def test_partition_key_scans(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-partition-key-scans', vector, unique_database)
 
   def test_table_repair(self, unique_database):
     tbl_name = 'tbl_with_removed_files'
@@ -2295,13 +2343,242 @@ class TestIcebergV2Table(IcebergTestSuite):
       data_files = self.filesystem_client.ls(DATA_PATH)
       self.filesystem_client.delete_file_dir(DATA_PATH + "/" + data_files[0])
       self.filesystem_client.delete_file_dir(DATA_PATH + "/" + data_files[1])
-      self.execute_query_expect_success(impalad_client, "invalidate metadata")
+      self.execute_query_expect_success(
+          impalad_client, "invalidate metadata {0}".format(db_tbl))
       result = self.execute_query_expect_success(
           impalad_client, repair_query.format(db_tbl))
       assert result.data[0] == \
           "Iceberg table repaired by deleting 2 manifest entries of missing data files."
       result = impalad_client.execute('select * from {0} order by i'.format(db_tbl))
       assert len(result.data) == 3
+
+
+class TestIcebergV3Table(IcebergTestSuite):
+  """Tests related to Iceberg V3 tables."""
+
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestIcebergV3Table, cls).add_test_dimensions()
+    cls.ImpalaTestMatrix.add_constraint(
+      lambda v: v.get_value('table_format').file_format == 'parquet')
+
+  def load_table(self, database, table_name, format="parquet"):
+    create_iceberg_table_from_directory(self.client, database,
+        table_name, format,
+        table_location="${IMPALA_HOME}/testdata/data/iceberg_test/iceberg_v3",
+        warehouse_prefix=os.getenv("FILESYSTEM_PREFIX"))
+
+  def test_v3_basic(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-v3-basic', vector, unique_database)
+
+  def test_v3_negative(self, vector, unique_database):
+    self.load_table(unique_database, "iceberg_v3_deletion_vectors")
+    self.load_table(unique_database, "iceberg_v3_default_value")
+    self.load_table(unique_database, "test_complex_default")
+    self.load_table(unique_database, "iceberg_v3_all_types")
+    self.run_test_case('QueryTest/iceberg-v3-negative', vector, unique_database)
+
+  def test_v3_row_lineage(self, vector, unique_database):
+    self.load_table(unique_database, "iceberg_v3_row_lineage")
+    self.load_table(unique_database, "iceberg_v3_row_lineage_orc", format="orc")
+    self.run_test_case('QueryTest/iceberg-v3-row-lineage', vector, unique_database)
+
+  def test_v3_delete(self, vector, unique_database):
+    """Test Iceberg V3 deletion vectors (Puffin files)."""
+    self.load_table(unique_database, "iceberg_v3_deletion_vectors")
+    self.run_test_case('QueryTest/iceberg-v3-delete', vector, unique_database)
+    self.run_test_case('QueryTest/iceberg-v3-delete-partition-sort',
+        vector, unique_database)
+
+  def test_v3_delete_partitioned(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-v3-delete-partitioned', vector, unique_database)
+
+  def test_v3_delete_on_existing_dv_table(self, vector, unique_database):
+    """Test DELETE on a table that already has deletion vectors written by Spark.
+    Verifies that Impala correctly reads and extends pre-existing Puffin DV files
+    produced by an external engine."""
+    self.load_table(unique_database, "iceberg_v3_deletion_vectors")
+    self.run_test_case('QueryTest/iceberg-v3-delete-existing-dv', vector, unique_database)
+
+  def test_v3_delete_on_v2_equality_delete_table(self, vector, unique_database):
+    """Test that a v2 table with Flink-written equality delete files can be upgraded to
+    v3 and that both the existing equality deletes and new Impala DV-based deletes are
+    applied correctly after the upgrade."""
+    create_iceberg_table_from_directory(self.client, unique_database,
+        "iceberg_v2_delete_equality", "parquet",
+        table_location="${IMPALA_HOME}/testdata/data/iceberg_test/hadoop_catalog/ice",
+        warehouse_prefix=os.getenv("FILESYSTEM_PREFIX"))
+    self.run_test_case('QueryTest/iceberg-v3-delete-v2-equality-upgrade',
+        vector, unique_database)
+
+  def test_v3_plain_count_star_optimization(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-v3-plain-count-star-optimization',
+        vector, unique_database)
+
+  @SkipIf.not_dfs
+  def test_v3_row_lineage_file_schema(self, unique_database):
+    """Test that plain INSERTs only write user columns, not hidden metadata columns."""
+    table_name = "ice_impala_lineage"
+    qualified_table_name = "%s.%s" % (unique_database, table_name)
+    query = """create table %s (a string) stored as iceberg
+               tblproperties ('format-version'='3')""" % qualified_table_name
+    self.client.execute(query)
+
+    query = "insert into %s values ('impala')" % qualified_table_name
+    self.client.execute(query)
+
+    # Copy the created file to the local filesystem and parse metadata
+    local_file = '/tmp/ice_impala_lineage_%s.parq' % random.randint(0, 10000)
+    LOG.info("test_v3_row_lineage_file_schema local file name: " + local_file)
+    hdfs_file = get_fs_path('/test-warehouse/%s.db/%s/data/*.parq'
+        % (unique_database, table_name))
+    check_call(['hadoop', 'fs', '-copyToLocal', hdfs_file, local_file])
+    try:
+      metadata = get_parquet_metadata(local_file)
+      # Verify that hidden columns are not written.
+      assert len(metadata.schema) == 2
+      root_schema_element = metadata.schema[0]
+      assert root_schema_element.name == 'schema'
+      a_schema_element = metadata.schema[1]
+      assert a_schema_element.name == 'a'
+    finally:
+      os.remove(local_file)
+
+  def test_v3_update(self, vector, unique_database):
+    udf_location = get_fs_path('/test-warehouse/libTestUdfs.so')
+    self.run_test_case('QueryTest/iceberg-v3-update', vector, unique_database,
+                       test_file_vars={'UDF_LOCATION': udf_location})
+
+  def test_v3_update_partitions(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-v3-update-partitions', vector,
+        unique_database)
+
+  def test_v3_optimize(self, vector, unique_database):
+    self.run_test_case('QueryTest/iceberg-v3-optimize', vector, unique_database)
+
+  def test_v3_default_values(self, vector, unique_database):
+    """Test Iceberg V3 initial-default and write-default values."""
+    self.load_table(unique_database, "iceberg_v3_default_value")
+    self.load_table(unique_database, "iceberg_v3_default_value_orc", format="orc")
+    self.load_table(unique_database, "iceberg_v3_default_value_avro", format="avro")
+    self.load_table(unique_database, "test_default_part")
+    self.load_table(unique_database, "test_complex_default")
+    self.load_table(unique_database, "iceberg_v3_all_types")
+    self.run_test_case('QueryTest/iceberg-v3-default-values', vector, unique_database)
+
+  def _assert_puffin_file_layout(self, local_file, reported_size,
+                                   content_offset, content_size):
+    """Validate the binary layout of a downloaded Puffin file.
+
+    Checks:
+    - Actual on-disk size matches manifest-reported file_size_in_bytes.
+    - DV blob extent (content_offset, content_size) fits within the file.
+    - PFA1 magic bytes at both ends.
+    - Blob bytes are readable at content_offset.
+    - Full structural size reconstruction from footer size field matches actual size.
+    """
+    actual_size = os.path.getsize(local_file)
+
+    assert actual_size == reported_size, (
+        "Puffin file size mismatch: actual=%d, manifest-reported=%d"
+        % (actual_size, reported_size))
+
+    assert content_offset >= 0, \
+        "content_offset must be non-negative, got %d" % content_offset
+    assert content_size > 0, \
+        "content_size_in_bytes must be positive, got %d" % content_size
+    assert content_offset + content_size <= actual_size, (
+        "DV blob extent [%d, %d) exceeds file size %d"
+        % (content_offset, content_offset + content_size, actual_size))
+
+    PUFFIN_MAGIC = b'\x50\x46\x41\x31'
+    with open(local_file, 'rb') as f:
+      header = f.read(4)
+      assert header == PUFFIN_MAGIC, \
+          "Unexpected Puffin header magic: %r" % header
+      f.seek(-4, 2)
+      trailer = f.read(4)
+      assert trailer == PUFFIN_MAGIC, \
+          "Unexpected Puffin trailer magic: %r" % trailer
+
+      # Read the footer size field (uint32 LE) at bytes [-12:-8], then reconstruct
+      # the expected total file size from first principles:
+      #
+      # Puffin file layout:
+      #   [File magic: 4]
+      #   [Blobs: total_blobs_size bytes]
+      #   [Footer leading magic: 4]
+      #   [Footer JSON: footer_json_len bytes]
+      #   [Footer size field (LE uint32): 4]  <- at bytes [-12:-8]
+      #   [Flags (reserved): 4]               <- at bytes [-8:-4]
+      #   [Trailing magic: 4]                 <- at bytes [-4:]
+      f.seek(-12, 2)
+      footer_json_len = struct.unpack('<I', f.read(4))[0]
+
+      # The footer leading magic sits immediately before the footer JSON.
+      # Everything between the file magic and the footer leading magic is blob data.
+      total_blobs_size = actual_size - 4 - 4 - footer_json_len - 4 - 4 - 4
+
+      expected_size = (
+          4                   # file magic
+          + total_blobs_size  # all blob data
+          + 4                 # footer leading magic
+          + footer_json_len   # footer JSON
+          + 4                 # footer size field
+          + 4                 # flags
+          + 4                 # trailing magic
+      )
+      assert actual_size == expected_size, (
+          "Puffin file size does not match structural calculation: "
+          "actual=%d, expected=%d "
+          "(content_offset=%d, content_size=%d, footer_json_len=%d)"
+          % (actual_size, expected_size,
+             content_offset, content_size, footer_json_len))
+
+  @SkipIf.not_dfs
+  def test_v3_delete_puffin_file_size(self, unique_database):
+    """Test that the Puffin file size recorded in the manifest matches the actual binary
+    size of the file on the filesystem, and that the DV blob extent (content_offset +
+    content_size_in_bytes) fits within that file. This guards against off-by-N bugs in
+    current_offset_ tracking inside PuffinWriter (e.g. the leading footer magic not being
+    accounted for)."""
+    table = "ice_puffin_size"
+    fqn = "%s.%s" % (unique_database, table)
+
+    self.client.execute("""
+        CREATE TABLE {fqn} (id INT, val STRING)
+        STORED BY ICEBERG
+        TBLPROPERTIES ('format-version'='3')
+    """.format(fqn=fqn))
+    self.client.execute(
+        "INSERT INTO {fqn} VALUES (1, 'a'), (2, 'b'), (3, 'c')".format(fqn=fqn))
+    self.client.execute(
+        "DELETE FROM {fqn} WHERE id = 2".format(fqn=fqn))
+
+    # Retrieve the Puffin file path, manifest-reported size, and DV blob extent.
+    result = self.client.execute("""
+        SELECT file_path, file_size_in_bytes, content_offset, content_size_in_bytes
+        FROM {fqn}.`files`
+        WHERE content = 1 AND file_format = 'PUFFIN'
+    """.format(fqn=fqn))
+    assert len(result.data) == 1, \
+        "Expected exactly one Puffin DV file, got: %s" % result.data
+    row = result.data[0].split('\t')
+    hdfs_path = row[0]
+    reported_size = int(row[1])
+    content_offset = int(row[2])
+    content_size = int(row[3])
+
+    # Download the Puffin file to a temporary directory and run layout checks.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_file = os.path.join(tmp_dir, "dv.puffin")
+      check_call(['hadoop', 'fs', '-copyToLocal', hdfs_path, local_file])
+      self._assert_puffin_file_layout(local_file, reported_size,
+                                      content_offset, content_size)
+
+  def test_v3_merge(self, vector, unique_database):
+    """MERGE INTO a table that was created as V2 then upgraded to V3."""
+    self.run_test_case('QueryTest/iceberg-v3-merge', vector, unique_database)
 
 
 # Tests to exercise the DIRECTED distribution mode for V2 Iceberg tables. Note, that most
@@ -2320,3 +2597,256 @@ class TestIcebergDirectedMode(IcebergTestSuite):
   @SkipIf.hardcoded_uris
   def test_directed_mode(self, vector):
       self.run_test_case('QueryTest/iceberg-v2-directed-mode', vector)
+
+
+class TestIcebergTableWithPuffinStats(IcebergTestSuite):
+  """Tests that Puffin stats are read correctly. The stats we use in these tests do not
+  necessarily reflect the actual state of the table in the tests."""
+
+  CREATE_TBL_STMT_TEMPLATE = """CREATE TABLE {} (
+        int_col1 INT,
+        int_col2 INT,
+        bigint_col BIGINT,
+        float_col FLOAT,
+        double_col DOUBLE,
+        decimal_col DECIMAL,
+        date_col DATE,
+        string_col STRING,
+        timestamp_col TIMESTAMP,
+        bool_col BOOLEAN) STORED BY ICEBERG"""
+
+  TBL_NAME = "ice_puffin_tbl"
+
+  @classmethod
+  def add_test_dimensions(cls):
+    super(TestIcebergTableWithPuffinStats, cls).add_test_dimensions()
+    cls.ImpalaTestMatrix.add_constraint(
+      lambda v: v.get_value('table_format').file_format == 'parquet')
+
+  class TblInfo:
+    def __init__(self, full_tbl_name, vector, tbl_loc, tbl_properties):
+      self.full_tbl_name = full_tbl_name
+      self.vector = vector
+      self.tbl_loc = tbl_loc
+      self.tbl_properties = tbl_properties
+
+  def test_puffin_stats_no_tbl_props_change(self, vector, unique_database):
+    """These tests do not change table properties after setup, they leave the table in a
+    clean state, so they can be run together."""
+    tbl_info = self._setup_table(vector, unique_database)
+
+    self._check_all_stats_in_1_file(tbl_info)
+    self._check_all_stats_in_2_files(tbl_info)
+    self._check_duplicate_stats_in_1_file(tbl_info)
+    self._check_duplicate_stats_in_2_files(tbl_info)
+    self._check_one_file_current_one_not(tbl_info)
+    self._check_not_all_blobs_current(tbl_info)
+    self._check_missing_file(tbl_info)
+    self._check_one_file_corrupt_one_not(tbl_info)
+    self._check_all_files_corrupt(tbl_info)
+    self._check_file_contains_invalid_field_id(tbl_info)
+    self._check_stats_for_unsupported_type(tbl_info)
+    self._check_invalid_and_corrupt_sketches(tbl_info)
+    self._check_metadata_ndv_ok_file_corrupt(tbl_info)
+    self._check_multiple_field_ids_for_blob(tbl_info)
+    self._check_some_blobs_current_some_not_in_2_files(tbl_info)
+
+  def test_stats_before_and_after_HMS_stats(self, vector, unique_database):
+    tbl_info = self._setup_table(vector, unique_database)
+
+    self._change_metadata_json_file(tbl_info, "not_all_blobs_current.metadata.json")
+
+    prev_snapshot_id = self._get_snapshot_ids(tbl_info.full_tbl_name)[1]
+
+    # Set HMS stats for the first and third column, for the previous snapshot.
+    # There are Puffin stats from the latest snapshot for the first two columns, and older
+    # Puffin stats for the next two columns - the HMS stats are more recent than these
+    # older Puffin stats.
+    stmts = [
+        "alter table {} set column stats int_col1('numDVs'='100')".format(
+            tbl_info.full_tbl_name),
+        "alter table {} set column stats bigint_col('numDVs'='300')".format(
+            tbl_info.full_tbl_name),
+        "alter table {} set tblproperties('impala.computeStatsSnapshotIds'= \
+            '1:{prev_snapshot_id},3:{prev_snapshot_id}')".format(tbl_info.full_tbl_name,
+                prev_snapshot_id=prev_snapshot_id)
+    ]
+    for stmt in stmts:
+      self.execute_query(stmt)
+
+    # Note: '4' is a value that comes from Puffin stats for an older snapshot for which
+    # there is no HMS stat.
+    self._assert_ndv_stats(tbl_info,
+        [1, 2, 300, 4, -1, -1, -1, -1, 2000, -1])
+
+  def test_puffin_stats_disabled_by_tbl_prop(self, vector, unique_database):
+    tbl_info = self._setup_table(vector, unique_database)
+
+    self._change_metadata_json_file(tbl_info, "all_stats_in_1_file.metadata.json")
+
+    # Disable reading Puffin stats with a table property.
+    disable_puffin_reading_tbl_prop_stmt = "alter table {} set tblproperties( \
+        'impala.iceberg_read_puffin_stats'='false')".format(
+        tbl_info.full_tbl_name)
+    self.execute_query(disable_puffin_reading_tbl_prop_stmt)
+
+    self._assert_ndv_stats(tbl_info, [-1, -1, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _setup_table(self, vector, unique_database):
+    tbl_name = "{}.{}".format(unique_database, self.TBL_NAME)
+    create_tbl_stmt = self.CREATE_TBL_STMT_TEMPLATE.format(tbl_name)
+    self.execute_query(create_tbl_stmt)
+
+    # Set stats in HMS so we can check that we fall back to that if we don't have Puffin
+    # stats.
+    set_stats_stmt = \
+        "alter table {} set column stats timestamp_col ('numDVs'='2000')".format(tbl_name)
+    self.execute_query(set_stats_stmt)
+
+    tbl_loc = self._get_table_location(tbl_name, vector)
+
+    tbl_properties = self._get_properties("Table Parameters:", tbl_name)
+    uuid = tbl_properties["uuid"]
+
+    self._copy_files_to_puffin_tbl(tbl_loc, uuid)
+
+    return self.TblInfo(tbl_name, vector, tbl_loc, tbl_properties)
+
+  def _get_snapshot_ids(self, tbl_name):
+    """ Returns the list of the table's snapshot ids, starting with the current one."""
+    query_template = "select snapshot_id from {}.snapshots order by committed_at desc"
+    query = query_template.format(tbl_name)
+    query_res = self.execute_query(query)
+    return query_res.data
+
+  def _copy_files_to_puffin_tbl(self, tbl_loc, uuid):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      self._copy_files_to_puffin_tbl_impl(tbl_loc, uuid, tmpdir)
+
+  def _copy_files_to_puffin_tbl_impl(self, tbl_loc, uuid, tmpdir):
+    metadata_dir = os.path.join(os.getenv("IMPALA_HOME"), "testdata/ice_puffin")
+    tbl_loc_placeholder = "TABLE_LOCATION_PLACEHOLDER"
+    uuid_placeholder = "UUID_PLACEHOLDER"
+
+    tmp_metadata_dir = tmpdir + "/dir"
+    tmp_generated_metadata_dir = os.path.join(tmp_metadata_dir, "generated")
+    shutil.copytree(metadata_dir, tmp_metadata_dir)
+
+    sed_location_pattern = "s|{}|{}|g".format(tbl_loc_placeholder, tbl_loc)
+    sed_uuid_pattern = "s/{}/{}/g".format(uuid_placeholder, uuid)
+    metadata_json_files = glob.glob(tmp_generated_metadata_dir + "/*metadata.json")
+    for metadata_json in metadata_json_files:
+      check_call(["sed", "-i", "-e", sed_location_pattern,
+                  "-e", sed_uuid_pattern, metadata_json])
+
+    # Move all files from the 'generated' subdirectory to the parent directory so that
+    # all files end up in the same directory on HDFS.
+    mv_cmd = "mv {generated_dir}/* {parent_dir} && rmdir {generated_dir}".format(
+        generated_dir=tmp_generated_metadata_dir, parent_dir=tmp_metadata_dir)
+    check_call(["bash", "-c", mv_cmd])
+
+    # Copy the files to HDFS.
+    self.filesystem_client.copy_from_local(glob.glob(tmp_metadata_dir + "/*"),
+        tbl_loc + "/metadata")
+
+  def _check_all_stats_in_1_file(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "all_stats_in_1_file.metadata.json", [1, 2, 3, 4, 5, 6, 7, 8, 9, -1])
+
+  def _check_all_stats_in_2_files(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "stats_divided.metadata.json", [1, 2, 3, 4, 5, 6, 7, 8, 9, -1])
+
+  def _check_duplicate_stats_in_1_file(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "duplicate_stats_in_1_file.metadata.json",
+        [1, 2, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_duplicate_stats_in_2_files(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "duplicate_stats_in_2_files.metadata.json",
+        [1, 2, 3, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_one_file_current_one_not(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "one_file_current_one_not.metadata.json",
+        [1, 2, 3, 4, -1, -1, -1, -1, 2000, -1])
+
+  def _check_not_all_blobs_current(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "not_all_blobs_current.metadata.json",
+        [1, 2, 3, 4, -1, -1, -1, -1, 2000, -1])
+
+  def _check_missing_file(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "missing_file.metadata.json", [-1, -1, 3, 4, -1, -1, -1, -1, 2000, -1])
+
+  def _check_one_file_corrupt_one_not(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "one_file_corrupt_one_not.metadata.json",
+        [-1, -1, 3, 4, -1, -1, -1, -1, 2000, -1])
+
+  def _check_all_files_corrupt(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "all_files_corrupt.metadata.json", [-1, -1, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_file_contains_invalid_field_id(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "file_contains_invalid_field_id.metadata.json",
+        [1, -1, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_stats_for_unsupported_type(self, tbl_info):
+    # Ndv stats are not supported for BOOLEAN in HMS, so we don't take it into account
+    # even if it is present in a Puffin file.
+    self._check_scenario(tbl_info,
+        "stats_for_unsupported_type.metadata.json",
+        [2, -1, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_invalid_and_corrupt_sketches(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "invalidAndCorruptSketches.metadata.json",
+        [1, -1, 3, -1, 5, -1, -1, -1, 2000, -1])
+
+  def _check_metadata_ndv_ok_file_corrupt(self, tbl_info):
+    # The Puffin file is corrupt but it shouldn't cause an error since we don't actually
+    # read it because we read the NDV value from the metadata.json file.
+    self._check_scenario(tbl_info,
+        "metadata_ndv_ok_stats_file_corrupt.metadata.json",
+        [1, 2, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_multiple_field_ids_for_blob(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "multiple_field_ids.metadata.json",
+        [-1, -1, -1, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_some_blobs_current_some_not_in_2_files(self, tbl_info):
+    self._check_scenario(tbl_info,
+        "some_blobs_current_some_not_in_2_files.metadata.json",
+        [1, 2, 3, -1, -1, -1, -1, -1, 2000, -1])
+
+  def _check_scenario(self, tbl_info, new_metadata_json_name, expected_ndvs):
+    self._change_metadata_json_file(tbl_info, new_metadata_json_name)
+    self._assert_ndv_stats(tbl_info, expected_ndvs)
+
+  def _change_metadata_json_file(self, tbl_info, new_metadata_json_name):
+    current_metadata_json_path = tbl_info.tbl_properties["metadata_location"]
+
+    # Overwrite the current metadata.json file with the given file.
+    new_metadata_json_path = os.path.join(tbl_info.tbl_loc, "metadata",
+        new_metadata_json_name)
+    self.filesystem_client.copy(new_metadata_json_path, current_metadata_json_path, True)
+
+    # Invalidate metadata so the change takes effect.
+    invalidate_metadata_stmt = "invalidate metadata {}".format(tbl_info.full_tbl_name)
+    self.execute_query(invalidate_metadata_stmt)
+
+  def _assert_ndv_stats(self, tbl_info, expected_ndvs):
+    show_col_stats_stmt = "show column stats {}".format(tbl_info.full_tbl_name)
+    res = self.execute_query(show_col_stats_stmt)
+
+    ndvs = self._get_ndvs_from_query_result(res)
+    assert expected_ndvs == ndvs
+
+  def _get_ndvs_from_query_result(self, query_result):
+    rows = query_result.get_data().split("\n")
+    return [int(row.split()[2]) for row in rows]

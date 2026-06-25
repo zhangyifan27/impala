@@ -17,9 +17,14 @@
 
 package org.apache.impala.planner;
 
+import com.google.common.base.Joiner;
+import static org.apache.impala.util.IcebergUtil.getFilePathHash;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,25 +40,31 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.ExpressionUtil;
 import org.apache.iceberg.expressions.ExpressionVisitors;
 import org.apache.iceberg.expressions.True;
 import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.metrics.MetricsReport;
-import org.apache.iceberg.metrics.MetricsReporter;
+import org.apache.iceberg.metrics.InMemoryMetricsReporter;
 import org.apache.iceberg.metrics.ScanMetricsResult;
 import org.apache.iceberg.metrics.ScanReport;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.types.Types;
+import org.apache.iceberg.types.Types.NestedField;
 import org.apache.impala.analysis.Analyzer;
 import org.apache.impala.analysis.BinaryPredicate;
 import org.apache.impala.analysis.BinaryPredicate.Operator;
 import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.IcebergExpressionCollector;
+import org.apache.impala.analysis.IcebergPartitionSpec;
 import org.apache.impala.analysis.JoinOperator;
 import org.apache.impala.analysis.MultiAggregateInfo;
+import org.apache.impala.analysis.Path;
 import org.apache.impala.analysis.SlotDescriptor;
 import org.apache.impala.analysis.SlotId;
 import org.apache.impala.analysis.SlotRef;
@@ -84,11 +95,12 @@ import org.apache.impala.fb.FbIcebergMetadata;
 import org.apache.impala.planner.JoinNode.DistributionMode;
 import org.apache.impala.service.Frontend;
 import org.apache.impala.thrift.TColumnStats;
-import org.apache.impala.thrift.TIcebergPartition;
+import org.apache.impala.thrift.TIcebergDeletionVector;
 import org.apache.impala.thrift.TIcebergPartitionTransformType;
 import org.apache.impala.thrift.TQueryOptions;
 import org.apache.impala.thrift.TVirtualColumnType;
 import org.apache.impala.util.Hash128;
+import org.apache.impala.util.IcebergSchemaConverter;
 import org.apache.impala.util.IcebergUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -100,26 +112,6 @@ import org.slf4j.LoggerFactory;
  * class deals with such complexities.
  */
 public class IcebergScanPlanner {
-  // TODO: This class is available in the Iceberg library from release 1.4.0. We could
-  // drop this and use the one from Iceberg once we've done a version bump.
-  private static class InMemoryMetricsReporter implements MetricsReporter {
-    private MetricsReport metricsReport_;
-
-    @Override
-    public void report(MetricsReport report) {
-      Preconditions.checkArgument(
-          report == null || report instanceof ScanReport,
-          "Metrics report is not a scan report");
-      this.metricsReport_ = report;
-    }
-
-    public ScanMetricsResult scanMetricsResult() {
-      if (metricsReport_ == null) return null;
-
-      return ((ScanReport) metricsReport_).scanMetrics();
-    }
-  }
-
   private static final Logger LOG = LoggerFactory.getLogger(IcebergScanPlanner.class);
 
   private Analyzer analyzer_;
@@ -138,6 +130,10 @@ public class IcebergScanPlanner {
   private final List<Expr> skippedExpressions_ = new ArrayList<>();
   // Impala expressions that can't be translated into Iceberg expressions
   private final List<Expr> untranslatedExpressions_ = new ArrayList<>();
+  // Impala expressions that were relaxed when pushed to Iceberg
+  // (e.g., LIKE 'd%d' -> startsWith('d'))
+  // These must be evaluated by Impala on the surviving rows
+  private final List<Expr> relaxedExpressions_ = new ArrayList<>();
   // Conjuncts on columns not involved in IDENTITY-partitioning.
   private List<Expr> nonIdentityConjuncts_ = new ArrayList<>();
 
@@ -145,6 +141,7 @@ public class IcebergScanPlanner {
   private List<IcebergFileDescriptor> dataFilesWithoutDeletes_ = new ArrayList<>();
   private List<IcebergFileDescriptor> dataFilesWithDeletes_ = new ArrayList<>();
   private Set<IcebergFileDescriptor> positionDeleteFiles_ = new HashSet<>();
+  public Map<Hash128, TIcebergDeletionVector> dataFileToDV_ = new HashMap<>();
 
   // Holds all the equalityFieldIds from the equality delete file descriptors involved in
   // this query.
@@ -155,7 +152,13 @@ public class IcebergScanPlanner {
 
   // Statistics about the data and delete files. Useful for memory estimates of the
   // ANTI JOIN
+  // Record count of legacy position-delete files only (not deletion vectors).
   private long positionDeletesRecordCount_ = 0;
+  // Record count contributed solely by deletion vectors, tracked separately so it can
+  // be passed to IcebergDeleteJoinNode for cardinality estimation. The delete scan
+  // node's fileDescs_ only contains legacy position-delete files, so its cardinality_
+  // misses DV-deleted rows; the join node adds dvDeletesRecordCount_ to compensate.
+  private long dvDeletesRecordCount_ = 0;
   private long dataFilesWithDeletesSumPaths_ = 0;
   private long dataFilesWithDeletesMaxPath_ = 0;
   // Stores how many delete records are involved broken down by equality field ID lists.
@@ -169,9 +172,11 @@ public class IcebergScanPlanner {
   // Predicates on columns in this set are always pushed down to Iceberg.
   private final Set<String> columnsWithPushDownHint_ = new HashSet<>();
 
+  private final ScanNodeHelper helper_;
+
   public IcebergScanPlanner(Analyzer analyzer, PlannerContext ctx,
-      TableRef iceTblRef, List<Expr> conjuncts, MultiAggregateInfo aggInfo)
-      throws ImpalaException {
+      TableRef iceTblRef, List<Expr> conjuncts, MultiAggregateInfo aggInfo,
+      ScanNodeHelper helper) throws ImpalaException {
     Preconditions.checkState(iceTblRef.getTable() instanceof FeIcebergTable ||
         iceTblRef.getTable() instanceof IcebergMetadataTable);
     analyzer_ = analyzer;
@@ -179,17 +184,30 @@ public class IcebergScanPlanner {
     tblRef_ = iceTblRef;
     conjuncts_ = conjuncts;
     aggInfo_ = aggInfo;
+    helper_ = helper;
 
     initPushDownHint();
     extractIcebergConjuncts();
     snapshotId_ = IcebergUtil.getSnapshotId(getIceTable(), tblRef_.getTimeTravelSpec());
   }
 
+  private ScanMetricsResult getScanMetrics() {
+    ScanReport report = metricsReporter_.scanReport();
+    ScanMetricsResult metricsResult;
+    if (report == null) {
+      metricsResult = null;
+    } else {
+      metricsResult = report.scanMetrics();
+    }
+    return metricsResult;
+  }
+
   public PlanNode createIcebergScanPlan() throws ImpalaException {
     PlanNode res = createPlanNodeHelper();
     Preconditions.checkNotNull(res);
 
-    ScanMetricsResult metricsResult = metricsReporter_.scanMetricsResult();
+    ScanMetricsResult metricsResult = getScanMetrics();
+
     Preconditions.checkState(
         !needIcebergForPlanning() || snapshotId_ == -1 || metricsResult != null);
 
@@ -237,16 +255,23 @@ public class IcebergScanPlanner {
     }
     dataFilesWithDeletes_ = fileStore.getDataFilesWithDeletes();
     positionDeleteFiles_ = new HashSet<>(fileStore.getPositionDeleteFiles());
+    dataFileToDV_ = fileStore.getDataFileToDV();
     initEqualityIds(fileStore.getEqualityDeleteFiles());
 
     updateDeleteStatistics();
   }
 
   private boolean noDeleteFiles() {
-    return positionDeleteFiles_.isEmpty() && equalityIdsToDeleteFiles_.isEmpty();
+    return positionDeleteFiles_.isEmpty() &&
+        equalityIdsToDeleteFiles_.isEmpty() &&
+        dataFileToDV_.isEmpty();
   }
 
   private PlanNode createIcebergScanPlanImpl() throws ImpalaException {
+    // Check for nested fields as they are not supported for Iceberg default values
+    checkForNestedDefaultValues();
+
+    boolean isPartitionKeyScan = IsPartitionKeyScan();
     if (noDeleteFiles()) {
       Preconditions.checkState(!tblRef_.optimizeCountStarForIcebergV2());
       // If there are no delete files we can just create a single SCAN node.
@@ -255,13 +280,15 @@ public class IcebergScanPlanner {
           aggInfo_, dataFilesWithoutDeletes_,
           getIceTable().getContentFileStore().getNumPartitions(),
           nonIdentityConjuncts_,
-          getSkippedConjuncts(), snapshotId_);
+          getSkippedConjuncts(), snapshotId_, isPartitionKeyScan, dataFileToDV_, helper_);
       ret.init(analyzer_);
       return ret;
     }
 
     PlanNode joinNode = null;
-    if (!positionDeleteFiles_.isEmpty()) joinNode = createPositionJoinNode();
+    if (!positionDeleteFiles_.isEmpty() || !dataFileToDV_.isEmpty()) {
+      joinNode = createPositionJoinNode();
+    }
 
     if (!equalityIdsToDeleteFiles_.isEmpty()) joinNode = createEqualityJoinNode(joinNode);
     Preconditions.checkNotNull(joinNode);
@@ -280,7 +307,8 @@ public class IcebergScanPlanner {
     IcebergScanNode dataScanNode = new IcebergScanNode(
         ctx_.getNextNodeId(), tblRef_, conjuncts_, aggInfo_, dataFilesWithoutDeletes_,
         getIceTable().getContentFileStore().getNumPartitions(),
-        nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_);
+        nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_,
+        isPartitionKeyScan, dataFileToDV_, helper_);
     dataScanNode.init(analyzer_);
     List<Expr> outputExprs = tblRef_.getDesc().getSlots().stream().map(
         SlotRef::new).collect(Collectors.toList());
@@ -299,8 +327,51 @@ public class IcebergScanPlanner {
     return unionNode;
   }
 
+  private boolean IsPartitionKeyScan() {
+    if (tblRef_.optimizeCountStarForIcebergV2()) return false;
+    boolean allAggsDistinct = aggInfo_ != null && aggInfo_.hasAllDistinctAgg();
+    if (!allAggsDistinct) return false;
+    TupleDescriptor tDesc = tblRef_.getDesc();
+    if (!tDesc.hasMaterializedSlots()) return true;
+
+    FeIcebergTable iceTable = getIceTable();
+    for (SlotDescriptor slotDesc: tDesc.getSlots()) {
+      if (!slotDesc.isMaterialized()) continue;
+      IcebergColumn column = (IcebergColumn) slotDesc.getColumn();
+      if (column == null) continue;
+      // We check all partition specs here. We are a bit stricter than necessary,
+      // because old partition specs might no longer have any data.
+      // TODO: later we could group data files (without deletes) into categories:
+      // - files eligible for partition key scan
+      // - files non-eligible for partition key scans
+      // Then we could do the following plan:
+      //              UNION  ALL
+      //           /       |      \
+      //         /         |        \
+      //       /           |          \
+      //  PARTITION     SCAN         ICEBERG
+      //  KEY          WITHOUT       DELETE
+      //  SCAN         DELETES        NODE
+      //                              /  \
+      //                             /    \
+      //                           SCAN   SCAN
+      //                           data   delete
+      //                           files  files
+      // Later PARTITION KEY SCAN could be a UNION NODE that produces the partition keys,
+      // see SingleNodePlanner.createOptimizedPartitionUnionNode().
+      for (IcebergPartitionSpec spec : iceTable.getPartitionSpecs()) {
+        if (IcebergUtil.getPartitionTransformType(column, spec) !=
+            TIcebergPartitionTransformType.IDENTITY) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   private PlanNode createPositionJoinNode() throws ImpalaException {
-    Preconditions.checkState(positionDeletesRecordCount_ != 0);
+    Preconditions.checkState(
+        positionDeletesRecordCount_ != 0 || !dataFileToDV_.isEmpty());
     Preconditions.checkState(dataFilesWithDeletesSumPaths_ != 0);
     Preconditions.checkState(dataFilesWithDeletesMaxPath_ != 0);
     // The followings just create separate scan nodes for data files and position delete
@@ -320,7 +391,8 @@ public class IcebergScanPlanner {
     IcebergScanNode dataScanNode = new IcebergScanNode(
         dataScanNodeId, tblRef_, conjuncts_, aggInfo_, dataFilesWithDeletes_,
         getIceTable().getContentFileStore().getNumPartitions(),
-        nonIdentityConjuncts_, getSkippedConjuncts(), deleteScanNodeId, snapshotId_);
+        nonIdentityConjuncts_, getSkippedConjuncts(), deleteScanNodeId, snapshotId_,
+        false /*isPartitionKeyScan*/, dataFileToDV_, helper_);
     dataScanNode.init(analyzer_);
     IcebergScanNode deleteScanNode = new IcebergScanNode(
         deleteScanNodeId,
@@ -331,7 +403,8 @@ public class IcebergScanPlanner {
         getIceTable().getContentFileStore().getNumPartitions(),
         Collections.emptyList(), /*nonIdentityConjuncts*/
         Collections.emptyList(), /*skippedConjuncts*/
-        snapshotId_);
+        snapshotId_,
+        false /*isPartitionKeyScan*/, dataFileToDV_, helper_);
     deleteScanNode.init(analyzer_);
 
     // Now let's create the JOIN node
@@ -340,13 +413,15 @@ public class IcebergScanPlanner {
 
     TQueryOptions queryOpts = analyzer_.getQueryCtx().client_request.query_options;
     JoinNode joinNode = null;
-    if (queryOpts.disable_optimized_iceberg_v2_read) {
+    if (queryOpts.disable_optimized_iceberg_v2_read
+        && getIceTable().getFormatVersion() == 2) {
       joinNode = new HashJoinNode(dataScanNode, deleteScanNode,
           /*straight_join=*/true, DistributionMode.NONE, JoinOperator.LEFT_ANTI_JOIN,
           positionJoinConjuncts, /*otherJoinConjuncts=*/Collections.emptyList());
     } else {
       joinNode =
-          new IcebergDeleteNode(dataScanNode, deleteScanNode, positionJoinConjuncts);
+          new IcebergDeleteJoinNode(dataScanNode, deleteScanNode, positionJoinConjuncts,
+              dvDeletesRecordCount_);
     }
     joinNode.setId(ctx_.getNextNodeId());
     joinNode.init(analyzer_);
@@ -533,7 +608,8 @@ public class IcebergScanPlanner {
       IcebergScanNode dataScanNode = new IcebergScanNode(
           dataScanNodeId, tblRef_, conjuncts_, aggInfo_, dataFilesWithDeletes_,
           getIceTable().getContentFileStore().getNumPartitions(),
-          nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_);
+          nonIdentityConjuncts_, getSkippedConjuncts(), snapshotId_,
+          false /*isPartitionKeyScan*/, dataFileToDV_, helper_);
       addAllSlotsForEqualityDeletes(tblRef_);
       dataScanNode.init(analyzer_);
 
@@ -573,8 +649,8 @@ public class IcebergScanPlanner {
           Lists.newArrayList(equalityDeleteFiles),
           getIceTable().getContentFileStore().getNumPartitions(),
           Collections.emptyList(), /*nonIdentityConjuncts*/
-          Collections.emptyList(),
-          snapshotId_); /*skippedConjuncts*/
+          Collections.emptyList(), /*skippedConjuncts*/
+          snapshotId_, false /*isPartitionKeyScan*/, dataFileToDV_, helper_);
       deleteScanNode.init(analyzer_);
 
       Pair<List<BinaryPredicate>, List<Expr>> equalityJoinConjuncts =
@@ -642,26 +718,42 @@ public class IcebergScanPlanner {
             metricsReporter_)) {
       long dataFilesCacheMisses = 0;
       for (FileScanTask fileScanTask : fileScanTasks) {
+        DataFile dataFile = fileScanTask.file();
         Expression residualExpr = fileScanTask.residual();
         if (residualExpr != null && !(residualExpr instanceof True)) {
           residualExpressions_.add(residualExpr);
         }
         Pair<IcebergFileDescriptor, Boolean> fileDesc =
-            getFileDescriptor(fileScanTask.file(), fileStore);
+            getFileDescriptor(dataFile, fileStore);
         if (!fileDesc.second) ++dataFilesCacheMisses;
         if (fileScanTask.deletes().isEmpty()) {
           dataFilesWithoutDeletes_.add(fileDesc.first);
         } else {
           dataFilesWithDeletes_.add(fileDesc.first);
           for (DeleteFile delFile : fileScanTask.deletes()) {
+            if (delFile.format() == FileFormat.PUFFIN) {
+              // A data file can have at most one DV, but may also be covered by legacy
+              // position-delete files simultaneously (e.g. after a partial V3 migration
+              // by an external engine). Assert there is no second DV for this file.
+              Hash128 dataFileHash = IcebergUtil.getFilePathHash(dataFile.location());
+              TIcebergDeletionVector dv = dataFileToDV_.put(dataFileHash,
+                  IcebergUtil.createTIcebergDeletionVector(delFile));
+              Preconditions.checkState(dv == null,
+                  "More than one deletion vector found for data file: %s",
+                  dataFile.location());
+              continue;
+            }
+            // Handle legacy delete files.
             Pair<IcebergFileDescriptor, Boolean> delFileDesc =
                 getFileDescriptor(delFile, fileStore);
             if (!delFileDesc.second) ++dataFilesCacheMisses;
             if (delFile.content() == FileContent.EQUALITY_DELETES) {
               addEqualityDeletesAndIds(delFileDesc.first);
-            } else {
-              Preconditions.checkState(delFile.content() == FileContent.POSITION_DELETES);
+            } else if (delFile.content() == FileContent.POSITION_DELETES) {
               positionDeleteFiles_.add(delFileDesc.first);
+            } else {
+              Preconditions.checkState(false,
+                  "Unknown delete file content type: " + delFile.content());
             }
           }
         }
@@ -703,7 +795,11 @@ public class IcebergScanPlanner {
 
   private void filterConjuncts() {
     if (residualExpressions_.isEmpty()) {
-      conjuncts_.removeAll(impalaIcebergPredicateMapping_.values());
+      // Remove fully pushed predicates but keep relaxed ones for evaluation
+      List<Expr> toRemove = impalaIcebergPredicateMapping_.values().stream()
+          .filter(expr -> !relaxedExpressions_.contains(expr))
+          .collect(Collectors.toList());
+      conjuncts_.removeAll(toRemove);
       return;
     }
     if (!analyzer_.getQueryOptions().iceberg_predicate_pushdown_subsetting) return;
@@ -713,6 +809,8 @@ public class IcebergScanPlanner {
   private boolean trySubsettingPredicatesBeingPushedDown() {
     long startTime = System.currentTimeMillis();
     List<Expr> expressionsToRetain = new ArrayList<>(untranslatedExpressions_);
+    // Add relaxed predicates - they were pushed to Iceberg but must still be evaluated
+    expressionsToRetain.addAll(relaxedExpressions_);
     for (Expression expression : residualExpressions_) {
       List<Expression> locatedExpressions = ExpressionVisitors.visit(expression,
           new IcebergExpressionCollector());
@@ -735,7 +833,10 @@ public class IcebergScanPlanner {
 
   private List<Expr> getSkippedConjuncts() {
     if (!residualExpressions_.isEmpty()) return skippedExpressions_;
-    return new ArrayList<>(impalaIcebergPredicateMapping_.values());
+    // Return all pushed predicates except relaxed ones (which still need evaluation)
+    return impalaIcebergPredicateMapping_.values().stream()
+        .filter(expr -> !relaxedExpressions_.contains(expr))
+        .collect(Collectors.toList());
   }
 
   private void updateDeleteStatistics() {
@@ -748,6 +849,15 @@ public class IcebergScanPlanner {
     for (Map.Entry<List<Integer>, Set<IcebergFileDescriptor>> entry :
         equalityIdsToDeleteFiles_.entrySet()) {
       updateEqualityDeleteFilesStatistics(entry.getKey(), entry.getValue());
+    }
+    updateDeletionVectorStatistics();
+  }
+
+  private void updateDeletionVectorStatistics() {
+    for (TIcebergDeletionVector dv : dataFileToDV_.values()) {
+      if (dv.isSetRecord_count()) {
+        dvDeletesRecordCount_ += dv.getRecord_count();
+      }
     }
   }
 
@@ -844,9 +954,9 @@ public class IcebergScanPlanner {
 
     Integer partitionId = 0;
 
-    TIcebergPartition partition =
-        IcebergUtil.createIcebergPartitionInfo(getIceTable().getIcebergApiTable(), cf);
-    Map<TIcebergPartition, Integer> partitions = fileStore.getPartitionMap();
+    ByteBuffer partition =
+        IcebergUtil.createFbIcebergPartition(getIceTable().getIcebergApiTable(), cf);
+    Map<ByteBuffer, Integer> partitions = fileStore.getPartitionMap();
     partitionId = partitions.get(partition);
     // If we do not find the partition among the current partitions cached by catalog, try
     // looking it up among the old descriptors' partitions.
@@ -980,6 +1090,124 @@ public class IcebergScanPlanner {
         transformType -> transformType == TIcebergPartitionTransformType.IDENTITY);
   }
 
+  /**
+   * Rejects scans when a default value appears on a nested field or on a top-level
+   * complex column, but only for Iceberg fields that are part of this scan (including
+   * all nested field ids under a materialized struct, array, or map).
+   *
+   * The catalog only attaches defaults to top-level columns, so this walks the
+   * Iceberg schema tree. Slots that are not referenced by the query are skipped.
+   */
+  private void checkForNestedDefaultValues() throws AnalysisException {
+    Set<Integer> materializedFieldIds = computeMaterializedIcebergFieldIds();
+    for (NestedField field : getIceTable().getIcebergSchema().columns()) {
+      visitIcebergFieldForUnsupportedDefaults(field,
+          Collections.singletonList(field.name()), materializedFieldIds);
+    }
+  }
+
+  /**
+   * Resolves materialized scan slots to Iceberg field ids, then adds every descendant
+   * field id so that selecting a struct column still covers inner fields for this check.
+   */
+  private Set<Integer> computeMaterializedIcebergFieldIds() {
+    Schema schema = getIceTable().getIcebergSchema();
+    Set<Integer> seedIds = new HashSet<>();
+    for (SlotDescriptor slot : tblRef_.getDesc().getSlots()) {
+      if (!slot.isMaterialized() || !slot.isScanSlot()) continue;
+      Path path = slot.getPath();
+      if (path == null || path.getRawPath().isEmpty()) continue;
+      String qualified = Joiner.on(".").join(path.getRawPath());
+      NestedField nf = schema.findField(qualified);
+      if (nf == null) nf = schema.caseInsensitiveFindField(qualified);
+      if (nf != null) seedIds.add(nf.fieldId());
+    }
+    return expandMaterializedFieldIds(seedIds, schema);
+  }
+
+  private static Set<Integer> expandMaterializedFieldIds(
+      Set<Integer> seedIds, Schema schema) {
+    Set<Integer> expanded = new HashSet<>(seedIds);
+    ArrayDeque<Integer> queue = new ArrayDeque<>(seedIds);
+    while (!queue.isEmpty()) {
+      int id = queue.remove();
+      NestedField nf = schema.findField(id);
+      if (nf == null) continue;
+      for (NestedField child : getIcebergChildFieldsToVisit(nf.type())) {
+        if (expanded.add(child.fieldId())) queue.add(child.fieldId());
+      }
+    }
+    return expanded;
+  }
+
+  /**
+   * If this field has a default, checks that Impala would allow it for fields that
+   * appear in this scan. Then recurses into struct, list, or map children.
+   */
+  private void visitIcebergFieldForUnsupportedDefaults(NestedField field,
+      List<String> pathFromRoot, Set<Integer> materializedFieldIds)
+      throws AnalysisException {
+    boolean hasDefault =
+        field.initialDefault() != null || field.writeDefault() != null;
+    if (hasDefault && materializedFieldIds.contains(field.fieldId())) {
+      boolean isNested = pathFromRoot.size() > 1;
+      Type impalaType;
+      try {
+        impalaType = IcebergSchemaConverter.toImpalaType(field.type());
+      } catch (ImpalaRuntimeException e) {
+        throw new AnalysisException(e.getMessage(), e);
+      }
+      if (isNested) {
+        throw new AnalysisException(String.format(
+            "Default values are not supported for nested fields. " +
+            "Nested field '%s' in column '%s' cannot have default values.",
+            String.join(".", pathFromRoot.subList(1, pathFromRoot.size())),
+            pathFromRoot.get(0)));
+      }
+      if (impalaType.isComplexType()) {
+        throw new AnalysisException(String.format(
+            "Default values are not supported for complex types. " +
+            "Column '%s' has type %s which cannot have default values.",
+            field.name(), impalaType.toSql()));
+      }
+      if (impalaType.isBinary()) {
+        throw new AnalysisException(String.format(
+            "Default values are not supported for BINARY/FIXED types. " +
+            "Column '%s' has type %s which cannot have default values.",
+            field.name(), impalaType.toSql()));
+      }
+      if (field.type() instanceof Types.TimestampType) {
+        Types.TimestampType tsType = (Types.TimestampType) field.type();
+        if (tsType.shouldAdjustToUTC()) {
+          throw new AnalysisException(String.format(
+              "Default values are not supported for TIMESTAMPTZ types. " +
+              "Column '%s' has Iceberg type timestamptz which cannot have " +
+              "default values.", field.name()));
+        }
+      }
+    }
+
+    for (NestedField child : getIcebergChildFieldsToVisit(field.type())) {
+      List<String> childPath = new ArrayList<>(pathFromRoot);
+      childPath.add(child.name());
+      visitIcebergFieldForUnsupportedDefaults(child, childPath, materializedFieldIds);
+    }
+  }
+
+  private static List<NestedField> getIcebergChildFieldsToVisit(
+      org.apache.iceberg.types.Type type) {
+    switch (type.typeId()) {
+      case STRUCT:
+        return type.asStructType().fields();
+      case LIST:
+        return type.asListType().fields();
+      case MAP:
+        return type.asMapType().fields();
+      default:
+        return Collections.emptyList();
+    }
+  }
+
   private boolean hasPartitionTransformType(List<IcebergColumn> cols,
       Map<SlotId, SlotDescriptor> idToSlotDesc,
       Predicate<TIcebergPartitionTransformType> pred) {
@@ -1001,21 +1229,33 @@ public class IcebergScanPlanner {
   }
 
   /**
-   * Transform Impala predicate to Iceberg predicate
+   * Transform Impala predicate to Iceberg predicate.
+   * Returns true if a predicate was pushed to Iceberg (even if partially converted).
+   * If the predicate was partially converted (e.g., LIKE 'd%d' -> startsWith('d')),
+   * the original predicate is kept in relaxedExpressions_ so it will
+   * be evaluated by Impala on the surviving rows after Iceberg pruning.
    */
   private boolean tryConvertIcebergPredicate(Expr expr) {
     IcebergPredicateConverter converter =
         new IcebergPredicateConverter(getIceTable().getIcebergSchema(), analyzer_);
-    try {
-      Expression predicate = converter.convert(expr);
-      impalaIcebergPredicateMapping_.put(predicate, expr);
-      LOG.debug("Push down the predicate: {} to iceberg", predicate);
-      return true;
-    }
-    catch (ImpalaException e) {
+    IcebergPredicateConverter.ConverterResult result = converter.convert(expr);
+
+    if (result.isFailed()) {
       untranslatedExpressions_.add(expr);
       return false;
     }
+
+    Expression icebergExpr = result.getIcebergExpression();
+    impalaIcebergPredicateMapping_.put(icebergExpr, expr);
+    LOG.debug("Push down the predicate: {} to iceberg (status={})",
+        icebergExpr, result.getStatus());
+
+    // If the predicate was partially converted, we must keep the original predicate
+    // for evaluation by Impala on the pruned data
+    if (result.isPartiallyConverted()) {
+      relaxedExpressions_.add(expr);
+    }
+    return true;
   }
 
 }

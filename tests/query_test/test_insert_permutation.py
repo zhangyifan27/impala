@@ -17,8 +17,6 @@
 
 # Targeted Impala insert tests
 
-from __future__ import absolute_import, division, print_function
-from builtins import map
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.test_dimensions import (
     create_exec_option_dimension,
@@ -49,3 +47,4 @@ class TestInsertQueriesWithPermutation(ImpalaTestSuite):
 
   def teardown_method(self, method):
     list(map(self.cleanup_db, ["insert_permutation_test"]))
+    super(TestInsertQueriesWithPermutation, self).teardown_method(method)
